@@ -47,14 +47,14 @@ check "/apply page loads" \
 # ── 2. OAuth discovery ─────────────────────────────────────
 check "OAuth discovery returns issuer == PUBLIC_BASE_URL (https, no trailing slash)" \
     bash -c "
-        ISSUER=\$(curl -sS '${BASE}/.well-known/oauth-authorization-server' | jq -r '.issuer')
-        [ \"\$ISSUER\" = '${BASE}' ]
+        curl -sSf '${BASE}/.well-known/oauth-authorization-server' |
+        python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get(\"issuer\") == \"${BASE}\" else 1)'
     "
 
 check "JWKS endpoint returns at least one key" \
     bash -c "
-        KEYS=\$(curl -sS '${BASE}/.well-known/jwks.json' | jq '.keys | length')
-        [ \"\$KEYS\" -ge 1 ]
+        curl -sSf '${BASE}/.well-known/jwks.json' |
+        python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if len(d.get(\"keys\", [])) >= 1 else 1)'
     "
 
 # ── 3. /internal/* blocked ─────────────────────────────────
