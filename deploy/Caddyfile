@@ -1,0 +1,44 @@
+# Caddyfile — single hostname, auto-HTTPS
+#
+# {$PUBLIC_HOST} is set via the PUBLIC_HOST env var in docker-compose.
+# Caddy auto-obtains a TLS certificate from Let's Encrypt / ZeroSSL.
+
+{$PUBLIC_HOST} {
+	# ── /internal/* — NEVER proxied, always 404 ─────────────────────
+	handle /internal/* {
+		respond 404
+	}
+
+	# ── MCP servers (stubs for now) ─────────────────────────────────
+	handle /citizen/mcp* {
+		reverse_proxy mcp-citizen:8080
+	}
+
+	handle /officer/mcp* {
+		reverse_proxy mcp-officer:8080
+	}
+
+	# ── OAuth protected-resource metadata (RFC 9728) ────────────────
+	# Route by path suffix to the right MCP app
+	handle /.well-known/oauth-protected-resource/citizen/* {
+		reverse_proxy mcp-citizen:8080
+	}
+
+	handle /.well-known/oauth-protected-resource/officer/* {
+		reverse_proxy mcp-officer:8080
+	}
+
+	# ── Eval dashboard ──────────────────────────────────────────────
+	handle /eval-dashboard* {
+		reverse_proxy eval-dashboard:8080
+	}
+
+	# ── Everything else → the Flask portal ──────────────────────────
+	handle {
+		reverse_proxy app:8000 {
+			header_up Host {host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+}

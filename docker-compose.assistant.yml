@@ -1,0 +1,96 @@
+# docker-compose.assistant.yml
+# Layer on top of docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.assistant.yml up -d --build
+#
+# Adds: caddy (HTTPS edge), mcp-citizen, mcp-officer, eval-dashboard (stubs for now).
+# Adds restart policy and healthchecks to the original services.
+
+services:
+  # ── Override existing services with restart + healthcheck ─────────────
+
+  db:
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sewasetu"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    restart: unless-stopped
+    # Remove the direct host port — Caddy is the edge now
+    ports: !reset []
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  scheduler:
+    restart: unless-stopped
+
+  smsgw:
+    restart: unless-stopped
+
+  # ── New services ──────────────────────────────────────────────────────
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"    # HTTP/3
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  mcp-citizen:
+    build: ./stubs/healthz
+    restart: unless-stopped
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  mcp-officer:
+    build: ./stubs/healthz
+    restart: unless-stopped
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  eval-dashboard:
+    build: ./stubs/healthz
+    restart: unless-stopped
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  caddy_data:
+  caddy_config:
