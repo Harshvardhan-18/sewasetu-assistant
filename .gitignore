@@ -1,6 +1,6 @@
 .env
 __pycache__/
 uploads/
+evals/runs/raw/
 *.pem
 DIRECTOR-NOTE.mp3
-docs
