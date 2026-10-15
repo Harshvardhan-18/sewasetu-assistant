@@ -605,6 +605,9 @@ def admin_reject(app_id):
 from oauth import oauth as _oauth_blueprint   # noqa: E402  (needs the definitions above)
 app.register_blueprint(_oauth_blueprint)
 
+from internal_api import internal_api as _internal_blueprint  # noqa: E402
+app.register_blueprint(_internal_blueprint)
+
 
 
 

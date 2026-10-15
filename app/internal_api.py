@@ -1,0 +1,998 @@
+# -*- coding: utf-8 -*-
+"""
+Internal API — /internal/api/v1
+
+Not routed publicly (Caddy returns 404 for /internal/*).
+Called by MCP servers with:
+  X-Internal-Key: <INTERNAL_API_KEY>
+  X-Acting-Subject: citizen:<10-digit-mobile> | officer:<username>
+
+Every response:
+  {ok, code, message_for_user, data, problems:[{field, plain}], next_step}
+"""
+
+import os
+import re
+import json
+import secrets
+import hashlib
+from datetime import datetime, timedelta
+
+import psycopg2
+from flask import Blueprint, request, jsonify, current_app
+
+# ---------------------------------------------------------------------------
+# Blueprint
+# ---------------------------------------------------------------------------
+
+internal_api = Blueprint("internal_api", __name__, url_prefix="/internal/api/v1")
+
+INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "")
+
+# ---------------------------------------------------------------------------
+# Auth middleware
+# ---------------------------------------------------------------------------
+
+def _response(ok, code, message, data=None, problems=None, next_step=""):
+    return jsonify({
+        "ok": ok,
+        "code": code,
+        "message_for_user": message,
+        "data": data or {},
+        "problems": problems or [],
+        "next_step": next_step,
+    })
+
+
+def _err(code, message, problems=None, status=400, next_step=""):
+    return _response(False, code, message, problems=problems, next_step=next_step), status
+
+
+def _auth():
+    """Validate X-Internal-Key and X-Acting-Subject.
+
+    Returns (subject, role) on success, or a Flask response tuple on failure.
+    """
+    given_key = request.headers.get("X-Internal-Key", "")
+    if not INTERNAL_API_KEY or not secrets.compare_digest(
+        given_key.encode(), INTERNAL_API_KEY.encode()
+    ):
+        return None, (_err("auth_error", "Invalid or missing X-Internal-Key.", status=403))
+
+    subject = request.headers.get("X-Acting-Subject", "")
+    m = re.match(r"^(citizen):(\d{10})$", subject)
+    if m:
+        return (subject, "citizen"), None
+    m = re.match(r"^(officer):(\w+)$", subject)
+    if m:
+        return (subject, "officer"), None
+
+    return None, (_err(
+        "auth_error",
+        "X-Acting-Subject must be citizen:<10-digit-mobile> or officer:<username>.",
+        status=403,
+    ))
+
+
+def _require_citizen():
+    (subject, role), err = _auth()
+    if err:
+        return None, None, err
+    if role != "citizen":
+        return None, None, (_err("forbidden", "Citizen subject required.", status=403))
+    mobile = subject.split(":", 1)[1]
+    return subject, mobile, None
+
+
+def _require_officer():
+    (subject, role), err = _auth()
+    if err:
+        return None, None, err
+    if role != "officer":
+        return None, None, (_err("forbidden", "Officer subject required.", status=403))
+    username = subject.split(":", 1)[1]
+    return subject, username, None
+
+
+def _get_db():
+    """Use the same get_db as app.py (patched in tests)."""
+    import app as portal
+    return portal.get_db()
+
+
+def _mask_account(acct):
+    if not acct or len(acct) < 4:
+        return acct
+    return "x" * (len(acct) - 4) + acct[-4:]
+
+
+def _app_to_dict(row, columns, mask_account=True):
+    d = dict(zip(columns, row))
+    if mask_account and "bank_account" in d:
+        d["bank_account"] = _mask_account(d["bank_account"])
+    # Serialize dates/datetimes
+    for k, v in d.items():
+        if isinstance(v, (datetime,)):
+            d[k] = v.isoformat(timespec="seconds")
+        elif hasattr(v, "isoformat"):  # date
+            d[k] = v.isoformat()
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Signout helpers (Section H)
+# ---------------------------------------------------------------------------
+
+def _get_revoked_at(subject):
+    conn = _get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT revoked_at FROM assistant_signouts WHERE subject=%s", (subject,)
+    )
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    return row[0] if row else None
+
+
+def _set_revoked_at(subject):
+    now = datetime.now()
+    conn = _get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO assistant_signouts (subject, revoked_at) VALUES (%s, %s) "
+        "ON CONFLICT (subject) DO UPDATE SET revoked_at = EXCLUDED.revoked_at",
+        (subject, now),
+    )
+    conn.commit()
+    cur.close(); conn.close()
+    return now
+
+
+# ---------------------------------------------------------------------------
+# Shared — GET /scheme
+# ---------------------------------------------------------------------------
+
+@internal_api.get("/scheme")
+def get_scheme():
+    auth_data, err = _auth()
+    if err:
+        return err
+    sub, role = auth_data
+    from services.applications import scheme_facts
+    facts = scheme_facts()
+    return _response(True, "ok", "Scheme information retrieved.", data=facts,
+                     next_step="Use this information when answering scheme questions.")
+
+
+# ---------------------------------------------------------------------------
+# Shared — POST /eligibility
+# ---------------------------------------------------------------------------
+
+@internal_api.post("/eligibility")
+def check_eligibility():
+    auth_data, err = _auth()
+    if err:
+        return err
+    sub, role = auth_data
+    body = request.get_json(silent=True) or {}
+    dob_str = body.get("dob", "")
+    from services.applications import eligibility_for
+    result = eligibility_for(dob_str)
+    ok = result.get("eligible", False)
+    return _response(
+        True, "ok", result.get("advice", ""),
+        data=result,
+        next_step=(
+            "Call save_application_draft with applicant details." if ok
+            else "Inform the citizen of their eligibility status."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Citizen — GET /me/status
+# ---------------------------------------------------------------------------
+
+@internal_api.get("/me/status")
+def citizen_status():
+    subject, mobile, err = _require_citizen()
+    if err:
+        return err
+
+    conn = _get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, application_no, applicant_name, dob, gender, marital_status, "
+        "village, block, bank_account, ifsc, doc_path, status, submitted_at, "
+        "decided_at, decided_by "
+        "FROM applications WHERE mobile=%s ORDER BY submitted_at DESC LIMIT 5",
+        (mobile,),
+    )
+    cols = ["id", "application_no", "applicant_name", "dob", "gender",
+            "marital_status", "village", "block", "bank_account", "ifsc",
+            "doc_path", "status", "submitted_at", "decided_at", "decided_by"]
+    rows = [_app_to_dict(r, cols) for r in cur.fetchall()]
+
+    # Determine can_apply / can_withdraw
+    from services.applications import active_application, ACTIVE_STATUSES, SLA_DAYS
+    active = active_application(cur, mobile)
+    cur.close(); conn.close()
+
+    can_apply = active is None
+    can_withdraw = active is not None and active[2] == "PENDING"
+    reason = None
+    if active and not can_apply:
+        reason = "You have an active application (%s, %s)." % (active[1], active[2])
+
+    # Days to deemed approval for the active one
+    days_to_deemed = None
+    if active:
+        conn2 = _get_db()
+        cur2 = conn2.cursor()
+        cur2.execute(
+            "SELECT submitted_at FROM applications WHERE id=%s", (active[0],)
+        )
+        sub_at = cur2.fetchone()
+        cur2.close(); conn2.close()
+        if sub_at:
+            days_pending = (datetime.now() - sub_at[0]).days
+            days_to_deemed = max(0, SLA_DAYS - days_pending)
+
+    return _response(
+        True, "ok", "Your application history.",
+        data={
+            "mobile_last4": mobile[-4:],
+            "applications": rows,
+            "can_apply": can_apply,
+            "can_withdraw": can_withdraw,
+            "reason": reason,
+            "days_to_deemed_approval": days_to_deemed,
+        },
+        next_step=(
+            "Call save_application_draft to start an application." if can_apply
+            else ("Call withdraw_application to withdraw and reapply." if can_withdraw
+                  else "No action available.")
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Citizen — PUT /me/draft
+# ---------------------------------------------------------------------------
+
+@internal_api.route("/me/draft", methods=["PUT"])
+def save_draft():
+    subject, mobile, err = _require_citizen()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    # Allowed fields only
+    ALLOWED = {
+        "applicant_name", "dob", "gender", "marital_status",
+        "husband_name", "village", "block", "bank_account", "ifsc",
+    }
+    update = {k: v for k, v in body.items() if k in ALLOWED}
+
+    conn = _get_db()
+    cur = conn.cursor()
+
+    # Load existing draft
+    cur.execute(
+        "SELECT data FROM assistant_drafts WHERE mobile=%s", (mobile,)
+    )
+    row = cur.fetchone()
+    existing = dict(row[0]) if row else {}
+    existing.update(update)
+
+    # Partial validate for problems (no doc required yet)
+    from services.applications import validate_application
+    errors, cleaned = validate_application(existing, existing.get("doc_path", ""))
+    # Filter out doc_path and window errors for the draft stage
+    problems = [
+        {"field": "general", "plain": e}
+        for e in errors
+        if "document" not in e and "window" not in e
+    ]
+    ready = len(problems) == 0
+
+    cur.execute(
+        "INSERT INTO assistant_drafts (mobile, data, updated_at) VALUES (%s,%s,%s) "
+        "ON CONFLICT (mobile) DO UPDATE SET data=EXCLUDED.data, updated_at=EXCLUDED.updated_at",
+        (mobile, json.dumps(existing), datetime.now()),
+    )
+    conn.commit()
+    cur.close(); conn.close()
+
+    # What's still missing?
+    required = ["applicant_name", "dob", "gender", "village", "block",
+                "bank_account", "ifsc"]
+    missing = [f for f in required if not existing.get(f)]
+
+    return _response(
+        True, "ok", "Draft updated.",
+        data={"draft": existing, "problems": problems,
+              "missing": missing, "ready_for_proof": len(missing) == 0},
+        next_step=(
+            "Call attach_age_proof to upload the age proof document."
+            if len(missing) == 0 else
+            "Collect the missing fields: " + ", ".join(missing) + "."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Citizen — POST /me/draft/proof  (metadata only; actual upload via portal)
+# ---------------------------------------------------------------------------
+
+@internal_api.post("/me/draft/proof")
+def attach_proof():
+    subject, mobile, err = _require_citizen()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    doc_name = body.get("filename", "")
+    doc_path = body.get("doc_path", "")  # set by the portal's upload endpoint
+
+    if not doc_name or not doc_path:
+        return _err("missing_field",
+                    "filename and doc_path are required.",
+                    problems=[{"field": "doc_path", "plain": "Upload the document first via /upload."}])
+
+    conn = _get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO assistant_drafts (mobile, data, doc_path, doc_name, updated_at) "
+        "VALUES (%s, '{}'::jsonb, %s, %s, %s) "
+        "ON CONFLICT (mobile) DO UPDATE SET doc_path=EXCLUDED.doc_path, "
+        "doc_name=EXCLUDED.doc_name, updated_at=EXCLUDED.updated_at",
+        (mobile, doc_path, doc_name, datetime.now()),
+    )
+    conn.commit()
+    cur.close(); conn.close()
+
+    return _response(True, "ok", "Age proof attached to draft.",
+                     data={"doc_name": doc_name},
+                     next_step="Call preview_application to review before submitting.")
+
+
+# ---------------------------------------------------------------------------
+# Citizen — POST /me/draft/preview
+# ---------------------------------------------------------------------------
+
+@internal_api.post("/me/draft/preview")
+def preview_draft():
+    subject, mobile, err = _require_citizen()
+    if err:
+        return err
+
+    conn = _get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT data, doc_path, doc_name FROM assistant_drafts WHERE mobile=%s "
+        "AND updated_at > %s",  # expire drafts older than 24h on read
+        (mobile, datetime.now() - timedelta(hours=24)),
+    )
+    row = cur.fetchone()
+    cur.close(); conn.close()
+
+    if not row:
+        return _err("no_draft",
+                    "No draft found (or draft expired after 24h). "
+                    "Please start filling your application details.",
+                    next_step="Call save_application_draft to create a new draft.")
+
+    data, doc_path, doc_name = row[0], row[1], row[2]
+    from services.applications import validate_application
+    errors, cleaned = validate_application(data, doc_path or "")
+    problems = [{"field": "general", "plain": e} for e in errors]
+
+    if problems:
+        return _response(
+            False, "validation_errors",
+            "The draft has errors that must be fixed before submitting.",
+            data={"draft": data, "doc_name": doc_name},
+            problems=problems,
+            next_step="Fix the problems and call save_application_draft again.",
+        )
+
+    # Compute a confirmation hash binding the exact draft state
+    import hashlib
+    state = json.dumps(data, sort_keys=True) + (doc_path or "")
+    confirmation_hash = hashlib.sha256(state.encode()).hexdigest()[:16]
+
+    # Store the hash in the draft row
+    conn = _get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE assistant_drafts SET confirmation_hash=%s WHERE mobile=%s",
+        (confirmation_hash, mobile),
+    )
+    conn.commit()
+    cur.close(); conn.close()
+
+    # Mask bank account in the preview
+    preview = dict(data)
+    if "bank_account" in preview:
+        preview["bank_account"] = _mask_account(preview["bank_account"])
+
+    declaration = (
+        "I declare that the information provided is true and correct to the best "
+        "of my knowledge. I understand that providing false information may lead "
+        "to rejection or cancellation of the application."
+    )
+
+    return _response(
+        True, "ok",
+        "Please read the declaration to the applicant and ask them to confirm.",
+        data={
+            "preview": preview,
+            "doc_name": doc_name,
+            "declaration": declaration,
+            "confirmation_code": confirmation_hash,
+        },
+        next_step=(
+            "Read the details and declaration aloud. "
+            "Call submit_application(confirmation_code, declaration_accepted=True) to submit."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Citizen — POST /me/applications
+# ---------------------------------------------------------------------------
+
+@internal_api.post("/me/applications")
+def submit_application():
+    subject, mobile, err = _require_citizen()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    confirmation_code = body.get("confirmation_code", "")
+    declaration_accepted = body.get("declaration_accepted", False)
+
+    if not declaration_accepted:
+        return _err("declaration_required",
+                    "The applicant must accept the declaration before submitting.",
+                    next_step="Ask the applicant to say 'yes' to the declaration.")
+
+    # Load draft and verify confirmation hash
+    conn = _get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT data, doc_path, confirmation_hash FROM assistant_drafts WHERE mobile=%s "
+        "AND updated_at > %s",
+        (mobile, datetime.now() - timedelta(hours=24)),
+    )
+    row = cur.fetchone()
+    cur.close(); conn.close()
+
+    if not row:
+        return _err("no_draft",
+                    "No draft found or draft expired. Please start again.",
+                    next_step="Call save_application_draft to create a new draft.")
+
+    data, doc_path, stored_hash = row
+    if not stored_hash or stored_hash != confirmation_code:
+        return _err("invalid_confirmation",
+                    "Confirmation code does not match. Please preview again.",
+                    next_step="Call preview_application to get a fresh confirmation code.")
+
+    from services.applications import submit_application as svc_submit
+    conn = _get_db()
+    cur = conn.cursor()
+    result = svc_submit(
+        cur, mobile, data, doc_path,
+        actor_note="via citizen assistant"
+    )
+
+    if not result["ok"]:
+        cur.close(); conn.close()
+        problems = [{"field": "general", "plain": e} for e in result["errors"]]
+        return _response(
+            False, "validation_errors",
+            "Application could not be submitted: " + "; ".join(result["errors"]),
+            problems=problems,
+            next_step="Fix the issues and try again.",
+        ), 422
+
+    conn.commit()
+
+    # Delete draft after successful submission
+    cur.execute("DELETE FROM assistant_drafts WHERE mobile=%s", (mobile,))
+    conn.commit()
+    cur.close(); conn.close()
+
+    # Send SMS (after commit)
+    import app as portal
+    portal.send_sms(
+        mobile,
+        "Sewa Setu: application %s received via citizen assistant. "
+        "Track at the status portal with mobile no. and password (DOB as DDMMYYYY)."
+        % result["application_no"],
+    )
+
+    return _response(
+        True, "application_submitted",
+        "Application %s has been submitted successfully." % result["application_no"],
+        data={"application_no": result["application_no"], "id": result["id"]},
+        next_step=(
+            "Offer to end_my_session for shared phone/kiosk safety. "
+            "The citizen can track status by calling get_my_status."
+        ),
+    ), 201
+
+
+# ---------------------------------------------------------------------------
+# Citizen — POST /me/applications/<no>/withdraw
+# ---------------------------------------------------------------------------
+
+@internal_api.post("/me/applications/<app_no>/withdraw")
+def withdraw_application(app_no):
+    subject, mobile, err = _require_citizen()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    confirm = body.get("confirm", False)
+    if not confirm:
+        return _err("confirm_required",
+                    "Pass confirm=true to confirm withdrawal.",
+                    next_step="Ask the citizen to confirm they want to withdraw.")
+
+    from services.applications import withdraw_application as svc_withdraw
+    conn = _get_db()
+    cur = conn.cursor()
+    result = svc_withdraw(cur, mobile, app_no)
+
+    if not result["ok"]:
+        cur.close(); conn.close()
+        return _err("withdraw_failed", result["error"],
+                    next_step="Only PENDING applications can be withdrawn.")
+
+    # Pre-fill draft from the withdrawn application
+    cur.execute(
+        "SELECT applicant_name, dob, gender, marital_status, husband_name, "
+        "village, block, bank_account, ifsc FROM applications WHERE id=%s",
+        (result["app_id"],),
+    )
+    app_row = cur.fetchone()
+    if app_row:
+        keys = ["applicant_name", "dob", "gender", "marital_status",
+                "husband_name", "village", "block", "bank_account", "ifsc"]
+        draft_data = {}
+        for k, v in zip(keys, app_row):
+            if hasattr(v, "isoformat"):
+                draft_data[k] = v.strftime("%d/%m/%Y") if hasattr(v, "day") else v.isoformat()
+            else:
+                draft_data[k] = v or ""
+        cur.execute(
+            "INSERT INTO assistant_drafts (mobile, data, updated_at) VALUES (%s,%s,%s) "
+            "ON CONFLICT (mobile) DO UPDATE SET data=EXCLUDED.data, "
+            "doc_path=NULL, doc_name=NULL, confirmation_hash=NULL, "
+            "updated_at=EXCLUDED.updated_at",
+            (mobile, json.dumps(draft_data), datetime.now()),
+        )
+
+    conn.commit()
+    cur.close(); conn.close()
+
+    return _response(
+        True, "withdrawn",
+        "Application %s has been withdrawn. A draft has been pre-filled with your previous details."
+        % result["application_no"],
+        data={"application_no": result["application_no"]},
+        next_step="Call save_application_draft to update details and reapply.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Citizen — POST /me/session/end
+# ---------------------------------------------------------------------------
+
+@internal_api.post("/me/session/end")
+def end_session():
+    subject, mobile, err = _require_citizen()
+    if err:
+        return err
+
+    # Revoke all OAuth grants for this subject
+    import oauth as oauth_mod
+    n = oauth_mod._revoke_grants(subject)
+
+    # Record signout cut-off time
+    revoked_at = _set_revoked_at(subject)
+
+    # Delete draft
+    conn = _get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM assistant_drafts WHERE mobile=%s", (mobile,))
+    conn.commit()
+    cur.close(); conn.close()
+
+    return _response(
+        True, "session_ended",
+        "Session ended. %d sign-in(s) revoked. "
+        "The next person at this phone can start fresh." % n,
+        data={"revoked_grants": n, "revoked_at": revoked_at.isoformat()},
+        next_step="The session is now closed. Goodbye.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Citizen — GET /me/session-state
+# ---------------------------------------------------------------------------
+
+@internal_api.get("/me/session-state")
+def session_state():
+    subject, mobile, err = _require_citizen()
+    if err:
+        return err
+
+    revoked_at = _get_revoked_at(subject)
+    return _response(
+        True, "ok", "Session state retrieved.",
+        data={
+            "subject": subject,
+            "revoked_at": revoked_at.isoformat() if revoked_at else None,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Officer — GET /officer/overview
+# ---------------------------------------------------------------------------
+
+@internal_api.get("/officer/overview")
+def officer_overview():
+    subject, username, err = _require_officer()
+    if err:
+        return err
+
+    from services.applications import SLA_DAYS
+    conn = _get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT status, count(*) FROM applications GROUP BY status ORDER BY count(*) DESC"
+    )
+    by_status = [{"status": r[0], "count": r[1]} for r in cur.fetchall()]
+
+    now = datetime.now()
+    cur.execute(
+        "SELECT count(*) FROM applications WHERE status='PENDING' AND submitted_at < %s",
+        (now - timedelta(days=SLA_DAYS),),
+    )
+    overdue = cur.fetchone()[0]
+
+    cur.execute(
+        "SELECT count(*) FROM applications WHERE status='PENDING' "
+        "AND submitted_at < %s AND submitted_at >= %s",
+        (now - timedelta(days=SLA_DAYS - 3), now - timedelta(days=SLA_DAYS)),
+    )
+    due_in_3 = cur.fetchone()[0]
+
+    cur.execute(
+        "SELECT count(*) FROM applications WHERE status='PENDING' "
+        "AND submitted_at < %s AND submitted_at >= %s",
+        (now - timedelta(days=SLA_DAYS - 7), now - timedelta(days=SLA_DAYS - 3)),
+    )
+    due_in_7 = cur.fetchone()[0]
+
+    cur.execute(
+        "SELECT application_no, submitted_at FROM applications "
+        "WHERE status='PENDING' ORDER BY submitted_at ASC LIMIT 1"
+    )
+    oldest = cur.fetchone()
+
+    cur.execute(
+        "SELECT block, count(*) FROM applications WHERE status='PENDING' "
+        "GROUP BY block ORDER BY count(*) DESC"
+    )
+    by_block = [{"block": r[0], "count": r[1]} for r in cur.fetchall()]
+    cur.close(); conn.close()
+
+    return _response(
+        True, "ok", "Queue overview retrieved.",
+        data={
+            "by_status": by_status,
+            "pending_overdue": overdue,
+            "pending_due_in_3_days": due_in_3,
+            "pending_due_in_7_days": due_in_7,
+            "oldest_pending": {
+                "application_no": oldest[0],
+                "submitted_at": oldest[1].isoformat() if oldest else None,
+            } if oldest else None,
+            "by_block": by_block,
+        },
+        next_step="Call list_applications to see the pending queue.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Officer — GET /officer/applications
+# ---------------------------------------------------------------------------
+
+@internal_api.get("/officer/applications")
+def officer_list_applications():
+    subject, username, err = _require_officer()
+    if err:
+        return err
+
+    from services.applications import SLA_DAYS
+    status = request.args.get("status", "PENDING")
+    block = request.args.get("block", "")
+    sort = request.args.get("sort", "oldest")
+    limit = min(int(request.args.get("limit", 20)), 100)
+    cursor_id = request.args.get("cursor")
+
+    order = "ASC" if sort == "oldest" else "DESC"
+
+    conn = _get_db()
+    cur = conn.cursor()
+    q = (
+        "SELECT id, application_no, applicant_name, block, submitted_at, status "
+        "FROM applications WHERE status=%s"
+    )
+    params = [status]
+    if block:
+        q += " AND block=%s"
+        params.append(block)
+    if cursor_id:
+        q += " AND id > %s" if sort == "oldest" else " AND id < %s"
+        params.append(int(cursor_id))
+    q += " ORDER BY submitted_at %s, id %s LIMIT %%s" % (order, order)
+    params.append(limit)
+    cur.execute(q, params)
+
+    now = datetime.now()
+    rows = []
+    for r in cur.fetchall():
+        days_pending = (now - r[4]).days
+        days_to_deemed = max(0, SLA_DAYS - days_pending)
+        flags = []
+        if days_to_deemed == 0:
+            flags.append("overdue")
+        elif days_to_deemed <= 3:
+            flags.append("due_soon")
+        rows.append({
+            "id": r[0],
+            "application_no": r[1],
+            "applicant_name": r[2],
+            "block": r[3],
+            "days_pending": days_pending,
+            "days_to_deemed_approval": days_to_deemed,
+            "flags": flags,
+        })
+    cur.close(); conn.close()
+
+    return _response(
+        True, "ok", "%d applications found." % len(rows),
+        data={"applications": rows, "count": len(rows)},
+        next_step="Call get_application with an application_no to see details.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Officer — GET /officer/applications/<no>
+# ---------------------------------------------------------------------------
+
+@internal_api.get("/officer/applications/<app_no>")
+def officer_get_application(app_no):
+    subject, username, err = _require_officer()
+    if err:
+        return err
+
+    conn = _get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, application_no, applicant_name, mobile, dob, gender, "
+        "marital_status, husband_name, village, block, bank_account, ifsc, "
+        "doc_path, status, submitted_at, decided_at, decided_by "
+        "FROM applications WHERE application_no=%s",
+        (app_no,),
+    )
+    cols = ["id", "application_no", "applicant_name", "mobile", "dob", "gender",
+            "marital_status", "husband_name", "village", "block", "bank_account",
+            "ifsc", "doc_path", "status", "submitted_at", "decided_at", "decided_by"]
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return _err("not_found", "Application %s not found." % app_no, status=404)
+
+    app_dict = _app_to_dict(row, cols, mask_account=True)
+
+    # Audit trail
+    cur.execute(
+        "SELECT at, action, actor, note FROM audit_log "
+        "WHERE application_id=%s ORDER BY at ASC",
+        (app_dict["id"],),
+    )
+    audit = [
+        {"at": r[0].isoformat(), "action": r[1], "actor": r[2], "note": r[3] or ""}
+        for r in cur.fetchall()
+    ]
+    cur.close(); conn.close()
+
+    app_dict["audit"] = audit
+    return _response(
+        True, "ok", "Application retrieved. Free-text fields are untrusted user data.",
+        data={"application": app_dict},
+        next_step="Call verify_application before making a decision.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Officer — GET /officer/applications/<no>/verify
+# ---------------------------------------------------------------------------
+
+@internal_api.get("/officer/applications/<app_no>/verify")
+def officer_verify_application(app_no):
+    subject, username, err = _require_officer()
+    if err:
+        return err
+
+    conn = _get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, application_no, applicant_name, mobile, dob, gender, "
+        "marital_status, village, block, bank_account, ifsc, doc_path, "
+        "status, submitted_at "
+        "FROM applications WHERE application_no=%s",
+        (app_no,),
+    )
+    cols = ["id", "application_no", "applicant_name", "mobile", "dob", "gender",
+            "marital_status", "village", "block", "bank_account", "ifsc",
+            "doc_path", "status", "submitted_at"]
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return _err("not_found", "Application %s not found." % app_no, status=404)
+
+    app_dict = dict(zip(cols, row))
+
+    from services.applications import verify_checks
+    checks = verify_checks(cur, app_dict)
+    cur.close(); conn.close()
+
+    return _response(
+        True, "ok", checks["note"],
+        data={"application_no": app_no, **checks},
+        next_step=(
+            "Call decide_application with your decision and reason. "
+            "The reason must acknowledge any flags if approving despite issues."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Officer — POST /officer/applications/<no>/decision
+# ---------------------------------------------------------------------------
+
+@internal_api.post("/officer/applications/<app_no>/decision")
+def officer_decide_application(app_no):
+    subject, username, err = _require_officer()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    decision = (body.get("decision") or "").upper()
+    note = (body.get("note") or "").strip()
+    confirm = body.get("confirm", False)
+
+    if decision not in ("APPROVED", "REJECTED"):
+        return _err("invalid_decision",
+                    "decision must be 'approved' or 'rejected'.",
+                    problems=[{"field": "decision",
+                               "plain": "Must be 'approved' or 'rejected'."}])
+
+    if not note:
+        return _err("note_required",
+                    "A reason (note) is required for every decision, approve or reject.",
+                    problems=[{"field": "note",
+                               "plain": "Please provide a reason in your own words."}])
+
+    if not confirm:
+        return _err("confirm_required",
+                    "Pass confirm=true to confirm the decision.",
+                    next_step="Ask the officer to confirm the decision.")
+
+    conn = _get_db()
+    cur = conn.cursor()
+
+    # Look up the application id
+    cur.execute("SELECT id FROM applications WHERE application_no=%s", (app_no,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return _err("not_found", "Application %s not found." % app_no, status=404)
+
+    app_id = row[0]
+
+    from services.applications import decide_application as svc_decide, verify_checks
+    # Check for hard failures and ensure note acknowledges them if approving
+    cur.execute(
+        "SELECT id, application_no, applicant_name, mobile, dob, gender, "
+        "marital_status, village, block, bank_account, ifsc, doc_path, "
+        "status, submitted_at "
+        "FROM applications WHERE id=%s", (app_id,)
+    )
+    cols = ["id", "application_no", "applicant_name", "mobile", "dob", "gender",
+            "marital_status", "village", "block", "bank_account", "ifsc",
+            "doc_path", "status", "submitted_at"]
+    app_row = cur.fetchone()
+    app_dict = dict(zip(cols, app_row)) if app_row else {}
+
+    if app_dict:
+        checks = verify_checks(cur, app_dict)
+        if decision == "APPROVED" and checks["hard_failures"]:
+            # The note must mention the flags
+            flags_mentioned = all(
+                flag.replace("_", " ") in note.lower() or flag in note.lower()
+                for flag in checks["hard_failures"]
+            )
+            if not flags_mentioned:
+                cur.close(); conn.close()
+                return _err(
+                    "acknowledge_flags",
+                    "This application has issues (%s). "
+                    "Your approval note must acknowledge them."
+                    % ", ".join(checks["hard_failures"]),
+                    problems=[{"field": "note",
+                               "plain": "Please mention the issues in your reason."}],
+                    next_step="Update your note to acknowledge: "
+                              + ", ".join(checks["hard_failures"]),
+                )
+
+    # Add provenance to note
+    full_note = ("via officer assistant | " + note)[:500]
+    result = svc_decide(cur, app_id, decision, username, full_note)
+
+    if not result["ok"]:
+        cur.close(); conn.close()
+        return _err("decide_failed", result["error"],
+                    next_step="Only PENDING applications can be decided.")
+
+    conn.commit()
+    cur.close(); conn.close()
+
+    return _response(
+        True, "decided",
+        "Application %s has been %s." % (app_no, decision.lower()),
+        data={"application_no": app_no, "decision": decision, "note": note},
+        next_step="Call queue_overview or list_applications to see the next case.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Officer — GET /officer/recent-decisions
+# ---------------------------------------------------------------------------
+
+@internal_api.get("/officer/recent-decisions")
+def officer_recent_decisions():
+    subject, username, err = _require_officer()
+    if err:
+        return err
+
+    limit = min(int(request.args.get("limit", 20)), 100)
+    conn = _get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT a.application_no, a.status, l.at, l.note "
+        "FROM audit_log l JOIN applications a ON a.id=l.application_id "
+        "WHERE l.actor=%s AND l.action IN ('APPROVED','REJECTED') "
+        "ORDER BY l.at DESC LIMIT %s",
+        ("admin:" + username, limit),
+    )
+    rows = [
+        {"application_no": r[0], "decision": r[1],
+         "at": r[2].isoformat(), "note": r[3] or ""}
+        for r in cur.fetchall()
+    ]
+    cur.close(); conn.close()
+
+    return _response(
+        True, "ok", "%d recent decisions." % len(rows),
+        data={"decisions": rows},
+    )
