@@ -187,9 +187,38 @@ def validate_application(data, doc_path):
         cleaned["dob"] = dob
         today = _now().date()
 
-        if age_on(dob, today) < MIN_AGE:
+        # F-rule: impossible values
+        if dob > today:
+            errors.append(
+                "date of birth cannot be in the future — "
+                "please check the date of birth against the age proof"
+            )
+        elif age_on(dob, today) > 110:
+            errors.append(
+                "date of birth implies an age over 110 years — "
+                "please check the date of birth against the age proof"
+            )
+        elif age_on(dob, today) < MIN_AGE:
             errors.append(
                 "applicant must be %d years of age or above" % MIN_AGE
+            )
+
+    # ── Name sanity (F-rule) ──────────────────────────────────────────────
+    name = cleaned["applicant_name"]
+    if name:
+        # At least 2 chars, at least one letter (any Unicode script),
+        # no control characters (category Cc).
+        if len(name) < 2:
+            errors.append(
+                "full name must be at least 2 characters"
+            )
+        elif not any(unicodedata.category(c).startswith("L") for c in name):
+            errors.append(
+                "full name must contain at least one letter"
+            )
+        elif any(unicodedata.category(c) == "Cc" for c in name):
+            errors.append(
+                "full name must not contain control characters"
             )
 
     # ── Document required ─────────────────────────────────────────────────
