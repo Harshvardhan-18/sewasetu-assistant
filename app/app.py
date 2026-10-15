@@ -91,6 +91,8 @@ def hash_password(p):
 
 
 def send_sms(mobile, text):
+    if os.environ.get("TESTING") or app.config.get("TESTING"):
+        return
     try:
         requests.post(SMS_GATEWAY_URL + "/api/send",
                       json={"to": mobile, "text": text}, timeout=5)
@@ -116,102 +118,23 @@ def write_audit(cur, app_id, action, actor, note=""):
 
 
 # ---------------------------------------------------------------------------
-# Scheme rules: the single source of truth for what an application must satisfy.
-# Every channel that creates an application (the web form, any API, any batch
-# import) MUST go through validate_application() and create_application() so
-# that no channel admits an application another channel would refuse.
+# Scheme rules: delegate to the service layer.
+# The web form and the internal API both go through these functions so no
+# channel admits an application another channel would refuse.
 # ---------------------------------------------------------------------------
 
-def parse_dob(raw):
-    try:
-        return datetime.strptime((raw or "").strip(), "%d/%m/%Y").date()
-    except ValueError:
-        return None
+from services.applications import (
+    validate_application,
+    active_application,
+    create_application,
+    submit_application as _svc_submit,
+    withdraw_application as _svc_withdraw,
+    decide_application as _svc_decide,
+    scheme_facts,
+)
 
-
-def age_on(dob, on):
-    return on.year - dob.year - ((on.month, on.day) < (dob.month, dob.day))
-
-
-def validate_application(data, doc_path):
-    """Validate a complete application. Returns (errors, cleaned).
-
-    `errors` is a list of plain-language problems (empty when valid);
-    `cleaned` holds the normalised values ready for create_application().
-    """
-    errors = []
-    cleaned = {
-        "applicant_name": sanitize(data.get("applicant_name")),
-        "village": (data.get("village") or "").strip(),
-        "block": (data.get("block") or "").strip(),
-        "gender": data.get("gender") or "",
-        "marital_status": data.get("marital_status") or "",
-        "husband_name": (data.get("husband_name") or "").strip(),
-        "husband_employer": "",  # no longer collected (not a scheme requirement)
-        "bank_account": re.sub(r"[\s-]", "", data.get("bank_account") or ""),
-        "ifsc": re.sub(r"[\s-]", "", (data.get("ifsc") or "")).upper(),
-        "doc_path": doc_path or "",
-        "dob": None,
-    }
-    for label, key in (("full name", "applicant_name"), ("village", "village"),
-                       ("block", "block"), ("bank account", "bank_account")):
-        if not cleaned[key]:
-            errors.append("%s is required" % label)
-    if cleaned["block"] and cleaned["block"] not in BLOCKS:
-        errors.append("block must be one of: " + ", ".join(BLOCKS))
-    if cleaned["bank_account"] and not re.fullmatch(r"\d{9,18}", cleaned["bank_account"]):
-        errors.append("bank account number must be 9 to 18 digits")
-    if cleaned["ifsc"] and not re.fullmatch(r"[A-Z]{4}0[A-Z0-9]{6}", cleaned["ifsc"]):
-        errors.append("IFSC must be 11 characters, e.g. SBIN0003077")
-    dob = parse_dob(data.get("dob"))
-    if dob is None:
-        errors.append("date of birth must be given as DD/MM/YYYY")
-    else:
-        cleaned["dob"] = dob
-        if age_on(dob, now_ist().date()) < MIN_AGE:
-            errors.append("applicant must be %d years of age or above" % MIN_AGE)
-    if not cleaned["doc_path"]:
-        errors.append("age proof document is required")
-    if now_ist() > SCHEME_DEADLINE:
-        errors.append("the application window has closed")
-    return errors, cleaned
-
-
-def active_application(cur, mobile):
-    """The applicant's current live application, if any."""
-    cur.execute("SELECT id, application_no, status FROM applications "
-                "WHERE mobile = %s AND status IN %s "
-                "ORDER BY submitted_at DESC LIMIT 1", (mobile, ACTIVE_STATUSES))
-    return cur.fetchone()
-
-
-def create_application(cur, mobile, cleaned):
-    """Insert a validated application; ensure the status-portal account exists.
-
-    The caller commits. Returns (id, application_no).
-    """
-    app_no = new_application_no()
-    cur.execute(
-        """INSERT INTO applications
-           (application_no, applicant_name, mobile, dob, gender, marital_status,
-            husband_name, husband_employer, village, block, bank_account, ifsc,
-            doc_path, status, submitted_at)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s)
-           RETURNING id""",
-        (app_no, cleaned["applicant_name"], mobile, cleaned["dob"], cleaned["gender"],
-         cleaned["marital_status"], cleaned["husband_name"], cleaned["husband_employer"],
-         cleaned["village"], cleaned["block"], cleaned["bank_account"], cleaned["ifsc"],
-         cleaned["doc_path"], datetime.now()))
-    new_id = cur.fetchone()[0]
-
-    # status portal account; password is DOB as DDMMYYYY per dept. circular
-    portal_pass = cleaned["dob"].strftime("%d%m%Y")
-    cur.execute("SELECT count(*) FROM portal_users WHERE mobile = %s", (mobile,))
-    if cur.fetchone()[0] == 0:
-        cur.execute("INSERT INTO portal_users (mobile, password_hash) VALUES (%s,%s)",
-                    (mobile, hash_password(portal_pass)))
-    write_audit(cur, new_id, "SUBMIT", "applicant:%s" % mobile)
-    return new_id, app_no
+# Keep parse_dob and age_on available at module level for templates / oauth
+from services.applications import parse_dob, age_on
 
 
 # ---------------------------------------------------------------------------
@@ -220,12 +143,20 @@ def create_application(cur, mobile, cleaned):
 
 @app.route("/")
 def index():
-    return render_template("index.html", hours_left=deadline_remaining())
+    facts = scheme_facts()
+    return render_template("index.html",
+                           hours_left=facts["hours_left"] if facts["window_open"] else None,
+                           pension_amount=facts["amount_rs_per_month"])
 
 
 @app.route("/about")
 def about():
-    return render_template("about.html")
+    facts = scheme_facts()
+    return render_template("about.html",
+                           pension_amount=facts["amount_rs_per_month"],
+                           min_age=facts["min_age"],
+                           sla_days=facts["sla_days"],
+                           accepted_documents=facts["accepted_documents"])
 
 
 @app.route("/__gateway/", defaults={"subpath": ""})
@@ -371,26 +302,35 @@ def declaration():
 
 
 def handle_submission():
+    """Create an application via the service layer.
+
+    Flash messages and redirects are byte-identical to the original.
+    The advisory lock and duplicate check now live inside submit_application().
+    """
     mobile = session.get("verified_mobile")
     data = session.get("form_data", {})
-    errors, cleaned = validate_application(data, session.get("doc_path", ""))
-    if errors:
-        flash("Please correct the following before submitting: " + "; ".join(errors) + ".")
-        return redirect(url_for("form_step", step=1))
+    doc_path = session.get("doc_path", "")
 
     conn = get_db()
     cur = conn.cursor()
-    existing = active_application(cur, mobile)
-    if existing:
-        cur.close(); conn.close()
-        flash("Application %s (%s) already exists for this mobile number. A pending "
-              "application can be withdrawn from the status portal if you need to "
-              "apply afresh." % (existing[1], existing[2]))
-        return redirect(url_for("index"))
+    result = _svc_submit(cur, mobile, data, doc_path)
 
-    new_id, app_no = create_application(cur, mobile, cleaned)
+    if not result["ok"]:
+        cur.close(); conn.close()
+        # The service returns errors list; distinguish duplicate vs. validation
+        msg = result["errors"][0] if result["errors"] else "Submission failed."
+        if "already exists" in msg:
+            flash(msg)
+            return redirect(url_for("index"))
+        flash("Please correct the following before submitting: " +
+              "; ".join(result["errors"]) + ".")
+        return redirect(url_for("form_step", step=1))
+
     conn.commit()
     cur.close(); conn.close()
+
+    new_id = result["id"]
+    app_no = result["application_no"]
 
     session.pop("form_data", None)
     session.pop("doc_path", None)
@@ -495,15 +435,11 @@ def withdraw_application(app_id):
     mobile = session["portal_mobile"]
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("UPDATE applications SET status = 'WITHDRAWN', decided_at = %s, "
-                "decided_by = 'APPLICANT' WHERE id = %s AND mobile = %s "
-                "AND status = 'PENDING' RETURNING application_no",
-                (datetime.now(), app_id, mobile))
-    row = cur.fetchone()
-    if row:
-        write_audit(cur, app_id, "WITHDRAW", "applicant:%s" % mobile)
+    result = _svc_withdraw(cur, mobile, app_id)
+    if result["ok"]:
         conn.commit()
-        flash("Application %s has been withdrawn. You may submit a new application." % row[0])
+        flash("Application %s has been withdrawn. You may submit a new application."
+              % result["application_no"])
     else:
         flash("Only a pending application can be withdrawn.")
     cur.close(); conn.close()
@@ -640,20 +576,16 @@ def admin_view(app_id):
 
 
 def _admin_decide(app_id, new_status, note):
-    """Approve/reject a PENDING application, recording who decided and when."""
+    """Approve/reject a PENDING application via the service layer."""
     if not session.get("admin"):
         abort(403)
     actor = session.get("admin_user", ADMIN_USERNAME)
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("UPDATE applications SET status = %s, decided_at = %s, decided_by = %s "
-                "WHERE id = %s AND status = 'PENDING' RETURNING application_no",
-                (new_status, datetime.now(), actor, app_id))
-    row = cur.fetchone()
-    if row:
-        write_audit(cur, app_id, new_status, "admin:%s" % actor, note)
+    result = _svc_decide(cur, app_id, new_status, actor, note or "")
+    if result["ok"]:
         conn.commit()
-        flash("Application %s %s." % (row[0], new_status.lower()))
+        flash("Application %s %s." % (result["application_no"], new_status.lower()))
     else:
         flash("Only a pending application can be decided.")
     cur.close(); conn.close()
@@ -672,6 +604,8 @@ def admin_reject(app_id):
 
 from oauth import oauth as _oauth_blueprint   # noqa: E402  (needs the definitions above)
 app.register_blueprint(_oauth_blueprint)
+
+
 
 
 if __name__ == "__main__":
