@@ -64,3 +64,62 @@ A migration script runs via a one-shot `migrate` service in `docker-compose.assi
 - Creates `assistant_signouts` table to support kiosk session revocation.
 - Creates the `one_active_per_mobile` partial unique index.
 
+---
+
+## 2026-10-15 — Prompt 3: MCP Common Library & Python SDK Authorization Research
+
+Before building `mcp_common`, we reviewed the official documentation and source code for the Python `mcp` SDK v2 (version 2.2.0).
+
+### 1. `MCPServer`, `AuthSettings`, and `TokenVerifier`
+- **Doc URLs:**
+  - Authorization: [https://py.sdk.modelcontextprotocol.io/run/authorization/](https://py.sdk.modelcontextprotocol.io/run/authorization/) (source: `docs/run/authorization.md`)
+  - Server Migration: [https://py.sdk.modelcontextprotocol.io/migration/](https://py.sdk.modelcontextprotocol.io/migration/)
+- **Findings:**
+  - `MCPServer` in `mcp.server.mcpserver` is the v2 replacement for `FastMCP`.
+  - Over streamable HTTP, the MCP server acts strictly as an **OAuth 2.1 Resource Server** (it does not sign users in or issue tokens; it validates incoming `Authorization: Bearer <token>` headers).
+  - The SDK has no opinion on token format; token verification is delegated to a class implementing the `TokenVerifier` protocol (`verify_token(token: str) -> AccessToken | None`).
+  - `token_verifier` and `auth` (`AuthSettings`) must always be provided together to `MCPServer`, or a `ValueError` is raised before serving.
+  - `AuthSettings` (`mcp.server.auth.settings`) configures:
+    - `issuer_url`: the portal's authorization server URL (`PUBLIC_BASE_URL`).
+    - `resource_server_url`: the canonical URL of the resource server (e.g. `https://HOST/citizen/mcp` or `https://HOST/officer/mcp`).
+    - `required_scopes`: list of required scopes (e.g. `['citizen']` or `['officer']`).
+    - `validate_token_resource = True`: enforces that the token's `resource` matches `resource_server_url`.
+
+### 2. `AccessToken` and Context Injection via `get_access_token`
+- **Doc URL:** [https://py.sdk.modelcontextprotocol.io/run/authorization/](https://py.sdk.modelcontextprotocol.io/run/authorization/)
+- **Findings:**
+  - `AccessToken` (`mcp.server.auth.provider`) represents the verified token state: `token`, `client_id`, `scopes`, `expires_at`, `resource`, `subject`, `claims`.
+  - During request handling, `AuthContextMiddleware` stores the `AccessToken` in `auth_context_var`.
+  - Tools and application code can call `get_access_token()` from `mcp.server.auth.middleware.auth_context` to retrieve the current token context without needing parameters passed in from the client.
+  - We expose `current_subject()` in `mcp_common` based on `get_access_token().subject` to guarantee that identity comes solely from the verified JWT.
+
+### 3. Protected Resource Metadata (RFC 9728)
+- **Doc URL:** [https://py.sdk.modelcontextprotocol.io/run/authorization/](https://py.sdk.modelcontextprotocol.io/run/authorization/)
+- **Findings:**
+  - When `resource_server_url` is specified in `AuthSettings`, the SDK automatically registers a route for RFC 9728 metadata at `/.well-known/oauth-protected-resource/<resource_path>`.
+  - It serves `{resource, authorization_servers: [issuer_url], scopes_supported: [role], bearer_methods_supported: ["header"]}`.
+  - Caddy proxies `/.well-known/oauth-protected-resource/citizen/*` to `mcp-citizen` and `/.well-known/oauth-protected-resource/officer/*` to `mcp-officer`.
+
+### 4. Stateless Streamable HTTP, Custom Endpoint Paths & Transport Security
+- **Doc URLs:**
+  - ASGI Integration: [https://py.sdk.modelcontextprotocol.io/run/asgi/](https://py.sdk.modelcontextprotocol.io/run/asgi/) (source: `docs/run/asgi.md`)
+  - Deployment & Host Allowlisting: [https://py.sdk.modelcontextprotocol.io/run/deploy/](https://py.sdk.modelcontextprotocol.io/run/deploy/) (source: `docs/run/deploy.md`)
+- **Findings:**
+  - `streamable_http_app(streamable_http_path="/citizen/mcp", stateless_http=True)` returns a Starlette ASGI app.
+  - On the modern `2026-07-28` protocol, requests are stateless by design (no `Mcp-Session-Id` header). `stateless_http=True` ensures legacy clients are also treated statelessly.
+  - **DNS Rebinding Trap:** By default, `streamable_http_app()` arms DNS-rebinding protection allowing only `localhost` / `127.0.0.1`. When deployed behind a reverse proxy (Caddy), requests with a non-localhost `Host` header are rejected with `421 Misdirected Request` before reaching any tool handler.
+  - We pass `transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False)` because Caddy terminates TLS and controls host routing at the network edge.
+
+### 5. `WWW-Authenticate` Scope Header Correction
+- **Finding:**
+  - In `mcp.server.lowlevel.server.RequireAuthMiddleware`, an unauthenticated request returns `401 Unauthorized` with `WWW-Authenticate: Bearer error="invalid_token", error_description="Authentication required", resource_metadata="..."`, but **omits `scope="<role>"`**.
+  - Since the Sewa Setu portal defaults to `citizen` scope when no scope is requested, an officer client connecting to `/officer/mcp` needs to know that `scope=officer` is required.
+  - We add `EnsureWWWAuthenticateScopeMiddleware` in `mcp_common` to append `scope="<role>"` to `WWW-Authenticate` on 401/403 responses.
+
+### 6. Server `instructions`
+- **Doc URL:** [https://py.sdk.modelcontextprotocol.io/servers/](https://py.sdk.modelcontextprotocol.io/servers/)
+- **Findings:**
+  - `instructions` is passed to `MCPServer(name=..., instructions=...)` and returned in the `initialize` handshake result.
+  - Because we do not control the client's system prompt in evaluations, all operational rules, personas, language policies, and kiosk sign-out procedures must be encoded directly in the server `instructions`.
+
+

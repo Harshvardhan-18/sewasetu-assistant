@@ -77,26 +77,54 @@ services:
       start_period: 30s
 
   mcp-citizen:
-    build: ./stubs/healthz
+    build:
+      context: .
+      dockerfile: citizen_mcp/Dockerfile
     restart: unless-stopped
     expose:
       - "8080"
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      CANONICAL_URL: ${PUBLIC_BASE_URL}/citizen/mcp
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      INTERNAL_API_URL: http://app:8000/internal/api/v1
+      INTERNAL_JWKS_URL: http://app:8000/.well-known/jwks.json
+    depends_on:
+      app:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')\""]
       interval: 15s
       timeout: 5s
       retries: 3
+      start_period: 30s
 
   mcp-officer:
-    build: ./stubs/healthz
+    build:
+      context: .
+      dockerfile: officer_mcp/Dockerfile
     restart: unless-stopped
     expose:
       - "8080"
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      CANONICAL_URL: ${PUBLIC_BASE_URL}/officer/mcp
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      INTERNAL_API_URL: http://app:8000/internal/api/v1
+      INTERNAL_JWKS_URL: http://app:8000/.well-known/jwks.json
+    depends_on:
+      app:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')\""]
       interval: 15s
       timeout: 5s
       retries: 3
+      start_period: 30s
 
   eval-dashboard:
     build: ./stubs/healthz

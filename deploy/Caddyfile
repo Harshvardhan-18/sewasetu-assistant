@@ -20,11 +20,11 @@
 
 	# ── OAuth protected-resource metadata (RFC 9728) ────────────────
 	# Route by path suffix to the right MCP app
-	handle /.well-known/oauth-protected-resource/citizen/* {
+	handle /.well-known/oauth-protected-resource/citizen* {
 		reverse_proxy mcp-citizen:8080
 	}
 
-	handle /.well-known/oauth-protected-resource/officer/* {
+	handle /.well-known/oauth-protected-resource/officer* {
 		reverse_proxy mcp-officer:8080
 	}
 
