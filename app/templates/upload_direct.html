@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Upload Age Proof Document</h2>
+{% if success %}
+<div class="alert alert-success" style="background:#e8f5e9; color:#1b5e20; padding:12px; border-radius:4px; margin-bottom:16px;">
+  <b>Document Uploaded Successfully!</b>
+  <p>Your document has been verified and attached to your active application draft.</p>
+  <p>You can now return to the AI assistant and say: <i>"I have uploaded my age proof."</i></p>
+</div>
+{% elif error %}
+<div class="alert alert-danger" style="background:#ffebee; color:#b71c1c; padding:12px; border-radius:4px; margin-bottom:16px;">
+  <b>Upload Failed:</b> {{ error }}
+</div>
+{% if can_retry %}
+<form method="post" enctype="multipart/form-data" action="/upload/direct?token={{ token }}">
+  <p class="note">Accepted documents: Birth Certificate, School Leaving Certificate, Voter ID.<br>
+  Accepted formats: <b>JPG, PNG, PDF (maximum size 5 MB)</b>.</p>
+
+  <label for="document_type">Document Type</label>
+  <select name="document_type" id="document_type" style="display:block; margin-bottom:12px; padding:6px 10px; width:100%; max-width:320px;">
+    <option value="birth_certificate">Birth Certificate</option>
+    <option value="school_leaving_certificate">School Leaving Certificate</option>
+    <option value="voter_id">Voter ID Card</option>
+  </select>
+
+  <label for="document">Select File</label>
+  <input type="file" name="document" id="document" accept=".jpg,.jpeg,.png,.pdf" style="display:block; margin-bottom:16px;">
+
+  <button class="btn" type="submit">Upload Document</button>
+</form>
+{% endif %}
+{% else %}
+<p class="note">Accepted documents: Birth Certificate, School Leaving Certificate, Voter ID.<br>
+Accepted formats: <b>JPG, PNG, PDF (maximum size 5 MB)</b>.</p>
+
+<form method="post" enctype="multipart/form-data" action="/upload/direct?token={{ token }}">
+  <label for="document_type">Document Type</label>
+  <select name="document_type" id="document_type" style="display:block; margin-bottom:12px; padding:6px 10px; width:100%; max-width:320px;">
+    <option value="birth_certificate">Birth Certificate</option>
+    <option value="school_leaving_certificate">School Leaving Certificate</option>
+    <option value="voter_id">Voter ID Card</option>
+  </select>
+
+  <label for="document">Select File</label>
+  <input type="file" name="document" id="document" accept=".jpg,.jpeg,.png,.pdf" style="display:block; margin-bottom:16px;">
+
+  <button class="btn" type="submit">Upload Document</button>
+</form>
+{% endif %}
+{% endblock %}

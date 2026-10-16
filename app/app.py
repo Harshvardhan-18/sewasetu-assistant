@@ -602,6 +602,112 @@ def admin_reject(app_id):
     return _admin_decide(app_id, "REJECTED", request.form.get("note", ""))
 
 
+@app.route("/upload/direct", methods=["GET", "POST"])
+def upload_direct():
+    """Single-use, 30m mobile/kiosk upload route for age proof."""
+    token = request.args.get("token", "").strip() or request.form.get("token", "").strip()
+    if not token:
+        return render_template(
+            "upload_direct.html",
+            error="Missing upload token. Please request an upload link from the assistant.",
+            can_retry=False,
+        ), 400
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT mobile, expires_at, used_at FROM assistant_upload_tokens WHERE token = %s",
+        (token,),
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return render_template(
+            "upload_direct.html",
+            error="Invalid upload token.",
+            can_retry=False,
+        ), 404
+
+    mobile, expires_at, used_at = row
+    now = datetime.now()
+
+    if used_at is not None:
+        cur.close(); conn.close()
+        return render_template(
+            "upload_direct.html",
+            error="This upload link has already been used. Please request a new link if you need to upload again.",
+            can_retry=False,
+        ), 400
+
+    if expires_at < now:
+        cur.close(); conn.close()
+        return render_template(
+            "upload_direct.html",
+            error="This upload link has expired (valid for 30 minutes). Please request a new link.",
+            can_retry=False,
+        ), 400
+
+    if request.method == "POST":
+        doc_type = request.form.get("document_type", "").strip()
+        from services.proof import ACCEPTED_DOCUMENT_TYPES, save_proof_file
+        if doc_type not in ACCEPTED_DOCUMENT_TYPES:
+            cur.close(); conn.close()
+            return render_template(
+                "upload_direct.html",
+                token=token,
+                can_retry=True,
+                error="Please select a valid document type (Birth Certificate, School Leaving Certificate, or Voter ID).",
+            ), 400
+
+        f = request.files.get("document")
+        if not f or not f.filename:
+            cur.close(); conn.close()
+            return render_template(
+                "upload_direct.html",
+                token=token,
+                can_retry=True,
+                error="Please select a file to upload.",
+            ), 400
+
+        content = f.read()
+        try:
+            doc_path, doc_name = save_proof_file(UPLOAD_DIR, content, f.filename)
+        except ValueError as exc:
+            cur.close(); conn.close()
+            return render_template(
+                "upload_direct.html",
+                token=token,
+                can_retry=True,
+                error=str(exc),
+            ), 400
+
+        # Update assistant_drafts for the token's bound mobile
+        cur.execute(
+            "INSERT INTO assistant_drafts (mobile, data, doc_path, doc_name, confirmation_hash, confirmation_expires_at, updated_at) "
+            "VALUES (%s, '{}'::jsonb, %s, %s, NULL, NULL, %s) "
+            "ON CONFLICT (mobile) DO UPDATE SET "
+            "doc_path = EXCLUDED.doc_path, "
+            "doc_name = EXCLUDED.doc_name, "
+            "confirmation_hash = NULL, "
+            "confirmation_expires_at = NULL, "
+            "updated_at = EXCLUDED.updated_at",
+            (mobile, doc_path, doc_name, now),
+        )
+
+        # Mark token as used
+        cur.execute(
+            "UPDATE assistant_upload_tokens SET used_at = %s WHERE token = %s",
+            (now, token),
+        )
+        conn.commit()
+        cur.close(); conn.close()
+
+        return render_template("upload_direct.html", success=True, doc_name=doc_name)
+
+    cur.close(); conn.close()
+    return render_template("upload_direct.html", token=token, can_retry=True)
+
+
 from oauth import oauth as _oauth_blueprint   # noqa: E402  (needs the definitions above)
 app.register_blueprint(_oauth_blueprint)
 
