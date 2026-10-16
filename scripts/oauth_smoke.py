@@ -16,10 +16,22 @@ Environment variables (all overridable by CLI flags):
     ADMIN_PASSWORD  (from .env)
     SMSGW_URL       http://localhost:8025  (inside compose network: http://smsgw:8025)
 
+Protocol note (mcp 2.2.0 / 2026-07-28):
+    The MCP 2026-07-28 modern transport does NOT use an initialize handshake.
+    Every POST is self-contained and must carry a _meta envelope:
+        params._meta = {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }
+    Legacy clients that send MCP-Protocol-Version: 2025-11-25 (or any earlier
+    handshake version) get routed to the stateless legacy path which requires
+    initialize -> notifications/initialized -> tools/call.
+    Both paths are tested by this script.
+
 Importable API for the eval harness:
     from scripts.oauth_smoke import obtain_token, call_tool, smoke_all, SmokeConfig
 
-Returns exit code 0 if every checked step passes, 1 on the first failure.
+Returns exit code 0 if every checked step passes, 1 on any failure.
 """
 
 from __future__ import annotations
@@ -69,12 +81,13 @@ def _get(url: str, *, headers: dict | None = None, timeout: int = 10) -> dict:
         return json.loads(resp.read())
 
 
-def _post_form(url: str, data: dict, *, timeout: int = 10) -> dict:
+def _post_form(url: str, data: dict, *, timeout: int = 10) -> tuple[int, dict]:
+    """POST form-encoded data. Returns (status_code, response_body_dict)."""
     body = urllib.parse.urlencode(data).encode()
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
+        return resp.status, json.loads(resp.read())
 
 
 def _post_json(url: str, payload: dict, *, timeout: int = 10) -> dict:
@@ -113,11 +126,34 @@ def _no_redirect_opener() -> urllib.request.OpenerDirector:
 
 # ── OTP fetch from SMS gateway ────────────────────────────────────────────────
 
-def _fetch_otp(smsgw_base: str, mobile: str, *, after: float, timeout: int = 25) -> str:
+def _count_gateway_messages(smsgw_base: str) -> int:
+    """Return the current number of messages in the gateway (used as a watermark)."""
+    try:
+        msgs = _get(f"{smsgw_base}/api/messages", timeout=5)
+        items = msgs if isinstance(msgs, list) else msgs.get("messages", [])
+        return len(items)
+    except Exception:
+        return 0
+
+
+def _fetch_otp(
+    smsgw_base: str,
+    mobile: str,
+    *,
+    after_count: int = 0,
+    after_time: float = 0.0,
+    timeout: int = 25,
+) -> str:
     """
-    Poll GET {smsgw_base}/api/messages until an OTP for `mobile` arrives.
-    `after` is a UNIX timestamp; messages older than that are skipped.
-    Returns the 6-digit OTP string.
+    Poll GET {smsgw_base}/api/messages until a NEW OTP for `mobile` arrives.
+
+    A message is considered new when EITHER:
+      - the total message list is longer than `after_count` (the watermark taken
+        before triggering the OTP), OR
+      - the message timestamp is later than `after_time` - 5 s (clock-skew grace).
+
+    Using the count watermark avoids picking up stale OTPs whose timestamp we
+    cannot parse reliably (the smsgw image varies).
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -127,11 +163,15 @@ def _fetch_otp(smsgw_base: str, mobile: str, *, after: float, timeout: int = 25)
             time.sleep(1)
             continue
         items = msgs if isinstance(msgs, list) else msgs.get("messages", [])
-        for msg in reversed(items):
+        total = len(items)
+        for idx, msg in enumerate(reversed(items)):
             to = str(msg.get("to", "") or msg.get("recipient", ""))
             if mobile not in to:
                 continue
-            # Parse timestamp — try several field names
+            # Determine if this message is new enough
+            position_from_end = total - idx   # 1-based position from newest
+            is_new_by_count = position_from_end > after_count
+            is_new_by_time = False
             ts_str = msg.get("created_at") or msg.get("timestamp") or ""
             if ts_str:
                 try:
@@ -139,10 +179,11 @@ def _fetch_otp(smsgw_base: str, mobile: str, *, after: float, timeout: int = 25)
                     ts_epoch = _dt.datetime.fromisoformat(
                         str(ts_str).replace("Z", "+00:00")
                     ).timestamp()
-                    if ts_epoch < after - 5:  # 5 s clock-skew grace
-                        continue
+                    is_new_by_time = ts_epoch >= after_time - 5
                 except Exception:
-                    pass  # unparseable timestamp → accept
+                    is_new_by_time = True  # unparseable → accept
+            if not (is_new_by_count or is_new_by_time):
+                continue
             body = str(msg.get("body", "") or msg.get("text", "") or msg.get("message", ""))
             m = re.search(r"\b(\d{6})\b", body)
             if m:
@@ -168,10 +209,11 @@ def _dcr(portal_base: str) -> str:
 
 # ── Headless authorize → extract rid ─────────────────────────────────────────
 
-def _start_auth(portal_base: str, client_id: str, redirect_uri: str,
-                role: str, canonical_url: str) -> tuple[str, str]:
+def _start_auth(
+    portal_base: str, client_id: str, redirect_uri: str, role: str, canonical_url: str
+) -> tuple[str, str, str]:
     """
-    Start the authorization flow; return (rid, state).
+    Start the authorization flow; return (rid, verifier, state).
     Sends GET /oauth/authorize with PKCE params, follows the redirect to
     /oauth/login?rid=…, and extracts rid.
     """
@@ -198,16 +240,25 @@ def _start_auth(portal_base: str, client_id: str, redirect_uri: str,
     qs = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
     rid = (qs.get("rid") or [""])[0]
     if not rid:
-        raise RuntimeError(f"Could not extract rid from /oauth/authorize → Location: {location!r}")
+        raise RuntimeError(
+            f"Could not extract rid from /oauth/authorize redirect. "
+            f"Location: {location!r}"
+        )
     return rid, verifier, state
 
 
 # ── Headless login ────────────────────────────────────────────────────────────
 
-def _login_citizen(portal_base: str, rid: str, mobile: str, smsgw_base: str) -> None:
-    """POST mobile, read OTP from SMS gateway, POST OTP."""
+def _login_citizen(
+    portal_base: str, rid: str, mobile: str, smsgw_base: str
+) -> None:
+    """POST mobile, read OTP from SMS gateway (watermarked), POST OTP."""
     login_url = f"{portal_base}/oauth/login?rid={rid}"
+
+    # Watermark BEFORE triggering the OTP so we never pick up a stale one.
+    msg_count_before = _count_gateway_messages(smsgw_base)
     t_before = time.time()
+    _info(f"Gateway message watermark: {msg_count_before} messages before OTP request")
 
     jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
@@ -217,13 +268,18 @@ def _login_citizen(portal_base: str, rid: str, mobile: str, smsgw_base: str) -> 
     req1 = urllib.request.Request(login_url, data=body1, method="POST")
     req1.add_header("Content-Type", "application/x-www-form-urlencoded")
     try:
-        with opener.open(req1) as _:
-            pass
-    except urllib.error.HTTPError:
-        pass  # page likely re-renders; that's fine
+        with opener.open(req1) as r:
+            _info(f"Mobile POST → HTTP {r.status}")
+    except urllib.error.HTTPError as e:
+        # Portal re-renders page (200) or redirects; both are fine
+        _info(f"Mobile POST → HTTP {e.code} (redirect/re-render, expected)")
 
-    # Step 2: Fetch OTP
-    otp = _fetch_otp(smsgw_base, mobile, after=t_before)
+    # Step 2: Fetch OTP — only messages NEWER than our watermark
+    otp = _fetch_otp(
+        smsgw_base, mobile,
+        after_count=msg_count_before,
+        after_time=t_before,
+    )
     _info(f"OTP received: {otp}")
 
     # Step 3: POST OTP
@@ -231,13 +287,18 @@ def _login_citizen(portal_base: str, rid: str, mobile: str, smsgw_base: str) -> 
     req2 = urllib.request.Request(login_url, data=body2, method="POST")
     req2.add_header("Content-Type", "application/x-www-form-urlencoded")
     try:
-        with opener.open(req2) as _:
-            pass
-    except urllib.error.HTTPError:
-        pass
+        with opener.open(req2) as r:
+            _info(f"OTP POST → HTTP {r.status}")
+    except urllib.error.HTTPError as e:
+        loc = e.headers.get("Location", "(none)")
+        _info(f"OTP POST → HTTP {e.code}  Location: {loc}")
+        if e.code not in (302, 303):
+            raise RuntimeError(f"OTP POST returned unexpected status {e.code}")
 
 
-def _login_officer(portal_base: str, rid: str, username: str, password: str) -> None:
+def _login_officer(
+    portal_base: str, rid: str, username: str, password: str
+) -> None:
     """POST credentials to the portal login page."""
     login_url = f"{portal_base}/oauth/login?rid={rid}"
     body = urllib.parse.urlencode({"username": username, "password": password}).encode()
@@ -246,13 +307,16 @@ def _login_officer(portal_base: str, rid: str, username: str, password: str) -> 
     jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
     try:
-        with opener.open(req) as _:
-            pass
-    except urllib.error.HTTPError:
-        pass
+        with opener.open(req) as r:
+            _info(f"Officer login POST → HTTP {r.status}")
+    except urllib.error.HTTPError as e:
+        loc = e.headers.get("Location", "(none)")
+        _info(f"Officer login POST → HTTP {e.code}  Location: {loc}")
+        if e.code not in (302, 303):
+            raise RuntimeError(f"Officer login POST returned unexpected status {e.code}")
 
 
-# ── Headless consent → extract authorization code ────────────────────────────
+# ── Headless consent → authorization code ────────────────────────────────────
 
 def _consent_and_get_code(portal_base: str, rid: str) -> str:
     """
@@ -274,11 +338,12 @@ def _consent_and_get_code(portal_base: str, rid: str) -> str:
     if not location:
         raise RuntimeError(
             "Consent POST did not produce a redirect. "
-            "The rid may have already been consumed or the login step failed."
+            "The rid may have already been consumed or the login step failed. "
+            "Check that the OTP was accepted (the OTP POST should redirect to /oauth/consent)."
         )
     qs = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
     if "error" in qs:
-        raise RuntimeError(f"Authorization server returned error: {qs}")
+        raise RuntimeError(f"Authorization server returned error: {dict(qs)}")
     code = (qs.get("code") or [""])[0]
     if not code:
         raise RuntimeError(f"No code in consent redirect Location: {location!r}")
@@ -316,7 +381,7 @@ def obtain_token(
     portal_base     Portal root URL, e.g. https://sewasetu-hv.koreacentral.cloudapp.azure.com
     canonical_url   MCP server URL used as `resource` (audience), e.g. {portal_base}/citizen/mcp
     role            "citizen" or "officer"
-    mobile          10-digit mobile (citizen only; must be in test range 9990000001-99)
+    mobile          10-digit test mobile (9990000001–99; citizen only)
     admin_username  Officer username
     admin_password  Officer password
     smsgw_base      SMS gateway base URL (GET /api/messages)
@@ -330,7 +395,9 @@ def obtain_token(
         client_id = _dcr(portal_base)
         _info(f"DCR → client_id={client_id}")
 
-    rid, verifier, state = _start_auth(portal_base, client_id, redirect_uri, role, canonical_url)
+    rid, verifier, state = _start_auth(
+        portal_base, client_id, redirect_uri, role, canonical_url
+    )
     _info(f"rid={rid}")
 
     if role == "citizen":
@@ -347,7 +414,7 @@ def obtain_token(
     code = _consent_and_get_code(portal_base, rid)
     _info(f"code={code[:12]}…")
 
-    token_resp = _post_form(
+    status, token_resp = _post_form(
         f"{portal_base}/oauth/token",
         {
             "grant_type": "authorization_code",
@@ -359,7 +426,7 @@ def obtain_token(
         },
     )
     if "error" in token_resp:
-        raise RuntimeError(f"Token exchange failed: {token_resp}")
+        raise RuntimeError(f"Token exchange failed (HTTP {status}): {token_resp}")
 
     return TokenResult(
         access_token=token_resp["access_token"],
@@ -371,10 +438,34 @@ def obtain_token(
     )
 
 
-# ── MCP tool call ─────────────────────────────────────────────────────────────
+# ── MCP tool call (modern 2026-07-28 path) ───────────────────────────────────
+#
+# The mcp 2.2.0 SDK routes requests based on the MCP-Protocol-Version header:
+#
+#   2026-07-28  → modern handler: NO initialize handshake; every POST is
+#                 self-contained and must carry params._meta with:
+#                   "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+#                   "io.modelcontextprotocol/clientCapabilities": {}
+#
+#   2025-11-25  → legacy stateless handler: standard initialize →
+#                 notifications/initialized → tools/call flow.
+#
+# We use the modern path by default (simpler, no session state). The legacy
+# path is exercised separately in check_legacy_handshake().
+
+_MODERN_PROTOCOL_VERSION = "2026-07-28"
+_LEGACY_PROTOCOL_VERSION = "2025-11-25"
+
+# The _meta envelope required by classify_inbound_request() on the modern path.
+_MODERN_META: dict = {
+    "io.modelcontextprotocol/protocolVersion": _MODERN_PROTOCOL_VERSION,
+    "io.modelcontextprotocol/clientCapabilities": {},
+    "io.modelcontextprotocol/clientInfo": {"name": "oauth_smoke", "version": "1.0"},
+}
+
 
 def _parse_sse_or_json(text: str) -> Any:
-    """Extract JSON-RPC payload from SSE data: lines or a plain JSON body."""
+    """Extract JSON-RPC payload from SSE `data:` lines or a plain JSON body."""
     text = text.strip()
     if text.startswith("data:"):
         for line in text.splitlines():
@@ -395,63 +486,110 @@ def call_tool(
     timeout: int = 15,
 ) -> Any:
     """
-    Call an MCP tool via the Streamable HTTP transport (2026-07-28 spec).
+    Call an MCP tool via the modern Streamable HTTP transport (2026-07-28).
 
-    Sends `initialize` followed by `tools/call` as separate stateless POSTs.
-    Returns the full JSON-RPC response dict for the tools/call.
+    Does NOT send `initialize`. Sends a single self-contained `tools/call`
+    POST with the required `params._meta` envelope. Returns the full
+    JSON-RPC response dict.
     """
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
-        "MCP-Protocol-Version": "2026-07-28",
+        "MCP-Protocol-Version": _MODERN_PROTOCOL_VERSION,
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": tool_name,
+    }
+
+    call_payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "_meta": _MODERN_META,
+            "name": tool_name,
+            "arguments": arguments or {},
+        },
+    }).encode()
+
+    req = urllib.request.Request(mcp_url, data=call_payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(f"tools/call failed HTTP {e.code}: {body[:500]}")
+
+    return _parse_sse_or_json(raw)
+
+
+def check_legacy_handshake(mcp_url: str, access_token: str, tool_name: str = "whoami") -> Any:
+    """
+    Exercise the LEGACY path: MCP-Protocol-Version: 2025-11-25.
+    Sends initialize → tools/call (legacy stateless path, no session ID needed).
+    Returns the tools/call response or raises on failure.
+    """
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        "MCP-Protocol-Version": _LEGACY_PROTOCOL_VERSION,
     }
 
     # initialize
     init_payload = json.dumps({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {
-            "protocolVersion": "2026-07-28", "capabilities": {},
-            "clientInfo": {"name": "oauth_smoke", "version": "1.0"},
+            "protocolVersion": _LEGACY_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "oauth_smoke_legacy", "version": "1.0"},
         },
     }).encode()
     req = urllib.request.Request(mcp_url, data=init_payload, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            _parse_sse_or_json(resp.read().decode())
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            init_raw = resp.read().decode()
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
-        raise RuntimeError(f"initialize failed HTTP {e.code}: {body[:400]}")
+        raise RuntimeError(f"legacy initialize failed HTTP {e.code}: {body[:400]}")
+    _info(f"  legacy initialize response (first 120 chars): {init_raw[:120]!r}")
 
-    # tools/call
+    # tools/call (legacy path uses plain params, no _meta)
     call_payload = json.dumps({
         "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": tool_name, "arguments": arguments or {}},
+        "params": {"name": tool_name, "arguments": {}},
     }).encode()
+    # Legacy stateless: each request starts fresh, so we send another POST.
+    # The legacy handler spins up a per-request connection; it remembers the
+    # protocol version from the header, not from a shared session.
     req2 = urllib.request.Request(mcp_url, data=call_payload, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req2, timeout=timeout) as resp:
+        with urllib.request.urlopen(req2, timeout=15) as resp:
             raw = resp.read().decode()
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
-        raise RuntimeError(f"tools/call failed HTTP {e.code}: {body[:400]}")
-
+        raise RuntimeError(f"legacy tools/call failed HTTP {e.code}: {body[:400]}")
     return _parse_sse_or_json(raw)
 
 
 # ── Unauthenticated 401 check ─────────────────────────────────────────────────
 
 def check_401(mcp_url: str, expected_scope: str) -> None:
-    """Assert an unauthenticated POST to `mcp_url` returns 401 with correct scope."""
+    """Assert an unauthenticated modern POST returns 401 with correct scope."""
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
-        "MCP-Protocol-Version": "2026-07-28",
+        "MCP-Protocol-Version": _MODERN_PROTOCOL_VERSION,
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "whoami",
     }
     payload = json.dumps({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {"protocolVersion": "2026-07-28", "capabilities": {},
-                   "clientInfo": {"name": "test", "version": "0"}},
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {
+            "_meta": _MODERN_META,
+            "name": "whoami",
+            "arguments": {},
+        },
     }).encode()
     req = urllib.request.Request(mcp_url, data=payload, headers=headers, method="POST")
     try:
@@ -481,6 +619,31 @@ def check_protected_resource_metadata(
     assert expected_scope in scopes, \
         f"scope {expected_scope!r} not in scopes_supported {scopes}"
     return meta
+
+
+# ── Result helpers ────────────────────────────────────────────────────────────
+
+def _validate_issuer(meta: dict, host: str) -> dict:
+    iss = meta.get("issuer", "")
+    assert iss == host, f"issuer={iss!r} != {host!r}"
+    return meta
+
+
+def _validate_jwks(data: dict) -> dict:
+    keys = data.get("keys", [])
+    assert len(keys) >= 1, f"JWKS has no keys: {data}"
+    return data
+
+
+def _extract_text(rpc_response: Any) -> str:
+    """Extract human-readable text from a JSON-RPC tools/call response."""
+    try:
+        content = rpc_response.get("result", {}).get("content", [])
+        if content:
+            return content[0].get("text", str(rpc_response))
+    except Exception:
+        pass
+    return str(rpc_response)
 
 
 # ── Main smoke orchestration ──────────────────────────────────────────────────
@@ -517,15 +680,17 @@ def smoke_all(cfg: SmokeConfig) -> bool:
             all_ok = False
             return None
 
-    print(f"\n{'─'*62}")
+    print(f"\n{'─'*64}")
     print(f"  Sewa Setu OAuth smoke  →  {host}")
-    print(f"{'─'*62}\n")
+    print(f"{'─'*64}\n")
 
     # 1. Discovery
     print("1. Discovery")
-    as_meta = check(
+    check(
         "AS metadata issuer == host",
-        lambda: _validate_issuer(_get(f"{host}/.well-known/oauth-authorization-server"), host),
+        lambda: _validate_issuer(
+            _get(f"{host}/.well-known/oauth-authorization-server"), host
+        ),
     )
     check(
         "JWKS has ≥1 key",
@@ -542,7 +707,7 @@ def smoke_all(cfg: SmokeConfig) -> bool:
               check_protected_resource_metadata, host, "officer/mcp", "officer")
 
     # 3. Unauthenticated → 401
-    print("\n3. Unauthenticated requests → 401 with scope")
+    print("\n3. Unauthenticated requests → 401 with scope (modern 2026-07-28)")
     if cfg.role in ("citizen", "both"):
         check('citizen /mcp → 401 with scope="citizen"',
               check_401, citizen_mcp, "citizen")
@@ -550,7 +715,7 @@ def smoke_all(cfg: SmokeConfig) -> bool:
         check('officer /mcp → 401 with scope="officer"',
               check_401, officer_mcp, "officer")
 
-    # 4. Citizen full flow
+    # 4. Citizen full flow (modern path)
     citizen_tok: TokenResult | None = None
     if cfg.role in ("citizen", "both"):
         print(f"\n4. Citizen OAuth flow  (mobile={cfg.mobile})")
@@ -567,21 +732,19 @@ def smoke_all(cfg: SmokeConfig) -> bool:
             _info(f"expires_in={citizen_tok.expires_in}s  "
                   f"session_ends={citizen_tok.session_ends}")
             result = check(
-                "whoami tool echoes citizen subject",
+                "whoami (modern 2026-07-28, no initialize)",
                 call_tool, citizen_mcp, citizen_tok.access_token, "whoami",
             )
             if result:
                 text = _extract_text(result)
                 _info(f"whoami → {text!r}")
-                check(
-                    f"whoami response contains mobile {cfg.mobile!r}",
-                    lambda t=text: None if cfg.mobile in t
-                                   else (_ for _ in ()).throw(
-                                       AssertionError(f"{cfg.mobile!r} not in {t!r}")
-                                   ),
-                )
+                if cfg.mobile not in text:
+                    _fail(f"mobile {cfg.mobile!r} not found in whoami response")
+                    all_ok = False
+                else:
+                    _ok(f"whoami response contains mobile {cfg.mobile!r}")
 
-    # 5. Officer full flow
+    # 5. Officer full flow (modern + legacy paths)
     officer_tok: TokenResult | None = None
     if cfg.role in ("officer", "both"):
         print(f"\n5. Officer OAuth flow  (user={cfg.admin_username})")
@@ -597,29 +760,36 @@ def smoke_all(cfg: SmokeConfig) -> bool:
         if officer_tok:
             _info(f"expires_in={officer_tok.expires_in}s  "
                   f"session_ends={officer_tok.session_ends}")
+
+            # 5a. Modern path
             result = check(
-                "whoami tool echoes officer subject",
+                "whoami (modern 2026-07-28, no initialize)",
                 call_tool, officer_mcp, officer_tok.access_token, "whoami",
             )
             if result:
                 text = _extract_text(result)
-                _info(f"whoami → {text!r}")
-                check(
-                    f"whoami response contains username {cfg.admin_username!r}",
-                    lambda t=text: None if cfg.admin_username in t
-                                   else (_ for _ in ()).throw(
-                                       AssertionError(
-                                           f"{cfg.admin_username!r} not in {t!r}"
-                                       )
-                                   ),
-                )
+                _info(f"whoami (modern) → {text!r}")
+                if cfg.admin_username not in text:
+                    _fail(f"username {cfg.admin_username!r} not in whoami response")
+                    all_ok = False
+                else:
+                    _ok(f"whoami response contains username {cfg.admin_username!r}")
 
-    # 6. Refresh token present
+            # 5b. Legacy handshake path (2025-11-25)
+            print(f"\n5b. Officer whoami via LEGACY handshake (2025-11-25)")
+            legacy_result = check(
+                "whoami (legacy 2025-11-25, initialize → tools/call)",
+                check_legacy_handshake,
+                officer_mcp, officer_tok.access_token, "whoami",
+            )
+            if legacy_result:
+                legacy_text = _extract_text(legacy_result)
+                _info(f"whoami (legacy) → {legacy_text!r}")
+
+    # 6. Refresh tokens
     print("\n6. Refresh tokens")
     for label, tok in [("citizen", citizen_tok), ("officer", officer_tok)]:
-        if tok is None:
-            continue
-        if cfg.role not in (label, "both"):
+        if tok is None or cfg.role not in (label, "both"):
             continue
         if tok.refresh_token:
             _ok(f"{label} refresh_token returned (rotation tested in portal suite)")
@@ -627,36 +797,13 @@ def smoke_all(cfg: SmokeConfig) -> bool:
             _fail(f"{label} refresh_token missing from token response")
             all_ok = False
 
-    print(f"\n{'─'*62}")
+    print(f"\n{'─'*64}")
     if all_ok:
         print(f"  {_GRN}ALL CHECKS PASSED{_RST}")
     else:
         print(f"  {_RED}SOME CHECKS FAILED — see ✗ lines above{_RST}")
-    print(f"{'─'*62}\n")
+    print(f"{'─'*64}\n")
     return all_ok
-
-
-def _validate_issuer(meta: dict, host: str) -> dict:
-    iss = meta.get("issuer", "")
-    assert iss == host, f"issuer={iss!r} != {host!r}"
-    return meta
-
-
-def _validate_jwks(data: dict) -> dict:
-    keys = data.get("keys", [])
-    assert len(keys) >= 1, f"JWKS has no keys: {data}"
-    return data
-
-
-def _extract_text(rpc_response: Any) -> str:
-    """Extract human-readable text from a JSON-RPC tools/call response."""
-    try:
-        content = rpc_response.get("result", {}).get("content", [])
-        if content:
-            return content[0].get("text", str(rpc_response))
-    except Exception:
-        pass
-    return str(rpc_response)
 
 
 # ── CLI entry-point ───────────────────────────────────────────────────────────
@@ -664,8 +811,6 @@ def _extract_text(rpc_response: Any) -> str:
 def _parse_args() -> SmokeConfig:
     p = argparse.ArgumentParser(
         description="Headless OAuth 2.1 smoke test for Sewa Setu MCP servers.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__.split("Returns exit")[0].strip(),
     )
     p.add_argument(
         "--host",
