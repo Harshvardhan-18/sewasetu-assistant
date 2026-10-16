@@ -240,6 +240,8 @@ def load_client(client_id):
 def client_metadata():
     """Client ID Metadata Document endpoint (RFC 7591 / OAuth draft)."""
     doc_url = request.base_url
+    if not doc_url.startswith("http://localhost") and not doc_url.startswith("http://127.0.0.1"):
+        doc_url = doc_url.replace("http://", "https://", 1)
     return jsonify({
         "client_id": doc_url,
         "client_name": "Sewa Setu Client ID Metadata Document Client",
