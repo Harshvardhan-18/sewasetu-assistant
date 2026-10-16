@@ -89,9 +89,10 @@ def _auth():
 
 
 def _require_citizen():
-    (subject, role), err = _auth()
+    auth_data, err = _auth()
     if err:
         return None, None, err
+    subject, role = auth_data
     if role != "citizen":
         return None, None, (_err("forbidden", "Citizen subject required.", status=403))
     mobile = subject.split(":", 1)[1]
@@ -99,9 +100,10 @@ def _require_citizen():
 
 
 def _require_officer():
-    (subject, role), err = _auth()
+    auth_data, err = _auth()
     if err:
         return None, None, err
+    subject, role = auth_data
     if role != "officer":
         return None, None, (_err("forbidden", "Officer subject required.", status=403))
     username = subject.split(":", 1)[1]
