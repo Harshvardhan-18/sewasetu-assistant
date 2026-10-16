@@ -539,7 +539,8 @@ def verify_checks(cur, app):
     acct = re.sub(r"[\s-]", "", app.get("bank_account") or "")
     checks["account_format"] = {
         "ok": bool(re.fullmatch(r"\d{9,18}", acct)),
-        "account": _mask_account(acct),
+        "account": acct,
+        "account_masked": _mask_account(acct),
     }
 
     # Document on file
@@ -608,20 +609,26 @@ def verify_checks(cur, app):
         "overdue": days_to_deemed == 0,
     }
 
-    # Hard-failure checks (review_only=True ones are advisory)
+    # Collect all flags: hard failures and triggered review flags
+    flags = [
+        k for k, v in checks.items()
+        if (not v.get("review_only") and not v.get("ok", True))
+        or (v.get("review_only") and v.get("flagged"))
+    ]
     hard_fails = [
         k for k, v in checks.items()
         if not v.get("review_only") and not v.get("ok", True)
     ]
-    recommendation = "APPROVE" if not hard_fails else "REVIEW"
+    recommendation = "APPROVE" if not flags else "REVIEW"
 
     return {
         "checks": checks,
+        "flags": flags,
         "hard_failures": hard_fails,
         "recommendation": recommendation,
         "note": (
-            "No issues found." if not hard_fails
-            else "Issues found: " + ", ".join(hard_fails) + ". "
-            + "Officer must acknowledge flags in the decision note."
+            "No issues found." if not flags
+            else "Flags found: " + ", ".join(flags) + ". "
+            + "Approval requires acknowledging these flags with a reason."
         ),
     }

@@ -17,6 +17,7 @@ import json
 import base64
 import secrets
 import hashlib
+import hmac
 import configparser
 from datetime import datetime, timedelta
 
@@ -58,8 +59,8 @@ def _response(ok, code, message, data=None, problems=None, next_step=""):
     })
 
 
-def _err(code, message, problems=None, status=400, next_step=""):
-    return _response(False, code, message, problems=problems, next_step=next_step), status
+def _err(code, message, problems=None, status=400, next_step="", data=None):
+    return _response(False, code, message, data=data, problems=problems, next_step=next_step), status
 
 
 def _auth():
@@ -229,6 +230,21 @@ def citizen_status():
             "doc_path", "status", "submitted_at", "decided_at", "decided_by"]
     rows = [_app_to_dict(r, cols) for r in cur.fetchall()]
 
+    # For decided applications, retrieve decision reason from audit_log and strip officer assistant prefix
+    for app in rows:
+        if app.get("status") in ("APPROVED", "REJECTED", "DEEMED_APPROVED"):
+            cur.execute(
+                "SELECT note FROM audit_log WHERE application_id=%s AND action=%s ORDER BY at DESC LIMIT 1",
+                (app["id"], app["status"]),
+            )
+            note_row = cur.fetchone()
+            if note_row and note_row[0]:
+                raw_note = note_row[0]
+                clean_note = re.sub(r"^via officer assistant[:\s|]+", "", raw_note).strip()
+                app["decision_reason"] = clean_note
+            else:
+                app["decision_reason"] = None
+
     # Determine can_apply / can_withdraw
     from services.applications import active_application, ACTIVE_STATUSES, SLA_DAYS
     active = active_application(cur, mobile)
@@ -239,6 +255,8 @@ def citizen_status():
     reason = None
     if active and not can_apply:
         reason = "You have an active application (%s, %s)." % (active[1], active[2])
+    elif rows and rows[0].get("status") == "REJECTED" and rows[0].get("decision_reason"):
+        reason = rows[0]["decision_reason"]
 
     # Days to deemed approval for the active one
     days_to_deemed = None
@@ -535,7 +553,9 @@ def preview_draft():
         "scheme_window_closes": facts.get("window_closes_at"),
     }
     state_str = json.dumps(code_state, sort_keys=True)
-    confirmation_hash = hashlib.sha256(state_str.encode("utf-8")).hexdigest()[:24]
+    raw_secret = os.environ.get("CONFIRMATION_HMAC_SECRET") or current_app.secret_key or "sewasetu-hmac-fallback-key"
+    secret = raw_secret.encode("utf-8") if isinstance(raw_secret, str) else raw_secret
+    confirmation_hash = hmac.new(secret, state_str.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
     expires_at = datetime.now() + timedelta(minutes=30)
 
     # Store the hash and expiry in the draft row
@@ -837,38 +857,48 @@ def officer_overview():
         return err
 
     from services.applications import SLA_DAYS
+    block = request.args.get("block", "").strip()
+
     conn = _get_db()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT status, count(*) FROM applications GROUP BY status ORDER BY count(*) DESC"
-    )
+
+    status_sql = "SELECT status, count(*) FROM applications"
+    status_params = []
+    if block:
+        status_sql += " WHERE block=%s"
+        status_params.append(block)
+    status_sql += " GROUP BY status ORDER BY count(*) DESC"
+    cur.execute(status_sql, status_params)
     by_status = [{"status": r[0], "count": r[1]} for r in cur.fetchall()]
 
     now = datetime.now()
-    cur.execute(
-        "SELECT count(*) FROM applications WHERE status='PENDING' AND submitted_at < %s",
-        (now - timedelta(days=SLA_DAYS),),
-    )
-    overdue = cur.fetchone()[0]
+    cutoff_overdue = now - timedelta(days=SLA_DAYS)
+    cutoff_3 = now - timedelta(days=SLA_DAYS - 3)
+    cutoff_7 = now - timedelta(days=SLA_DAYS - 7)
 
-    cur.execute(
-        "SELECT count(*) FROM applications WHERE status='PENDING' "
-        "AND submitted_at < %s AND submitted_at >= %s",
-        (now - timedelta(days=SLA_DAYS - 3), now - timedelta(days=SLA_DAYS)),
-    )
-    due_in_3 = cur.fetchone()[0]
+    def _count_pending_between(start_dt, end_dt=None):
+        sql = "SELECT count(*) FROM applications WHERE status='PENDING' AND submitted_at < %s"
+        p = [start_dt]
+        if end_dt:
+            sql += " AND submitted_at >= %s"
+            p.append(end_dt)
+        if block:
+            sql += " AND block=%s"
+            p.append(block)
+        cur.execute(sql, p)
+        return cur.fetchone()[0]
 
-    cur.execute(
-        "SELECT count(*) FROM applications WHERE status='PENDING' "
-        "AND submitted_at < %s AND submitted_at >= %s",
-        (now - timedelta(days=SLA_DAYS - 7), now - timedelta(days=SLA_DAYS - 3)),
-    )
-    due_in_7 = cur.fetchone()[0]
+    overdue = _count_pending_between(cutoff_overdue)
+    due_in_3 = _count_pending_between(cutoff_3, cutoff_overdue)
+    due_in_7 = _count_pending_between(cutoff_7, cutoff_3)
 
-    cur.execute(
-        "SELECT application_no, submitted_at FROM applications "
-        "WHERE status='PENDING' ORDER BY submitted_at ASC LIMIT 1"
-    )
+    oldest_sql = "SELECT application_no, submitted_at FROM applications WHERE status='PENDING'"
+    oldest_params = []
+    if block:
+        oldest_sql += " AND block=%s"
+        oldest_params.append(block)
+    oldest_sql += " ORDER BY submitted_at ASC LIMIT 1"
+    cur.execute(oldest_sql, oldest_params)
     oldest = cur.fetchone()
 
     cur.execute(
@@ -876,11 +906,19 @@ def officer_overview():
         "GROUP BY block ORDER BY count(*) DESC"
     )
     by_block = [{"block": r[0], "count": r[1]} for r in cur.fetchall()]
+
+    cur.execute("SELECT count(*) FROM applications WHERE status='DEEMED_APPROVED'")
+    deemed_total = cur.fetchone()[0]
+
+    pending_count = next((s["count"] for s in by_status if s["status"] == "PENDING"), 0)
     cur.close(); conn.close()
 
     return _response(
         True, "ok", "Queue overview retrieved.",
         data={
+            "block_filter": block or None,
+            "pending_count": pending_count,
+            "deemed_approvals_total": deemed_total,
             "by_status": by_status,
             "pending_overdue": overdue,
             "pending_due_in_3_days": due_in_3,
@@ -925,8 +963,19 @@ def officer_list_applications():
         q += " AND block=%s"
         params.append(block)
     if cursor_id:
-        q += " AND id > %s" if sort == "oldest" else " AND id < %s"
-        params.append(int(cursor_id))
+        cur.execute("SELECT submitted_at FROM applications WHERE id=%s", (int(cursor_id),))
+        crow = cur.fetchone()
+        if crow:
+            c_sub = crow[0]
+            if sort == "oldest":
+                q += " AND (submitted_at > %s OR (submitted_at = %s AND id > %s))"
+                params.extend([c_sub, c_sub, int(cursor_id)])
+            else:
+                q += " AND (submitted_at < %s OR (submitted_at = %s AND id < %s))"
+                params.extend([c_sub, c_sub, int(cursor_id)])
+        else:
+            q += " AND id > %s" if sort == "oldest" else " AND id < %s"
+            params.append(int(cursor_id))
     q += " ORDER BY submitted_at %s, id %s LIMIT %%s" % (order, order)
     params.append(limit)
     cur.execute(q, params)
@@ -934,12 +983,12 @@ def officer_list_applications():
     now = datetime.now()
     rows = []
     for r in cur.fetchall():
-        days_pending = (now - r[4]).days
+        days_pending = (now - r[4]).days if r[4] else 0
         days_to_deemed = max(0, SLA_DAYS - days_pending)
         flags = []
-        if days_to_deemed == 0:
+        if days_to_deemed == 0 and r[5] == "PENDING":
             flags.append("overdue")
-        elif days_to_deemed <= 3:
+        elif days_to_deemed <= 3 and r[5] == "PENDING":
             flags.append("due_soon")
         rows.append({
             "id": r[0],
@@ -952,9 +1001,89 @@ def officer_list_applications():
         })
     cur.close(); conn.close()
 
+    next_cursor = str(rows[-1]["id"]) if len(rows) == limit else None
     return _response(
         True, "ok", "%d applications found." % len(rows),
-        data={"applications": rows, "count": len(rows)},
+        data={"applications": rows, "count": len(rows), "next_cursor": next_cursor},
+        next_step="Call get_application with an application_no to see details.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Officer — GET /officer/search
+# ---------------------------------------------------------------------------
+
+@internal_api.get("/officer/search")
+def officer_search_applications():
+    subject, username, err = _require_officer()
+    if err:
+        return err
+
+    from services.applications import SLA_DAYS
+    query = request.args.get("query", "").strip()
+    status = request.args.get("status", "PENDING").strip()
+    block = request.args.get("block", "").strip()
+    limit = min(int(request.args.get("limit", 20)), 100)
+    cursor_id = request.args.get("cursor")
+
+    if not query:
+        return _err(
+            "query_required",
+            "query parameter is required (application_no, mobile, or applicant_name).",
+            problems=[{"field": "query", "plain": "Search query cannot be empty."}],
+        )
+
+    conn = _get_db()
+    cur = conn.cursor()
+
+    conditions = ["(application_no ILIKE %s OR mobile ILIKE %s OR applicant_name ILIKE %s)"]
+    pattern = f"%{query}%"
+    params = [pattern, pattern, pattern]
+
+    if status:
+        conditions.append("status=%s")
+        params.append(status)
+    if block:
+        conditions.append("block=%s")
+        params.append(block)
+    if cursor_id:
+        conditions.append("id > %s")
+        params.append(int(cursor_id))
+
+    sql = (
+        "SELECT id, application_no, applicant_name, block, submitted_at, status "
+        f"FROM applications WHERE {' AND '.join(conditions)} "
+        "ORDER BY submitted_at ASC, id ASC LIMIT %s"
+    )
+    params.append(limit)
+    cur.execute(sql, params)
+
+    now = datetime.now()
+    rows = []
+    for r in cur.fetchall():
+        days_pending = (now - r[4]).days if r[4] else 0
+        days_to_deemed = max(0, SLA_DAYS - days_pending)
+        flags = []
+        if days_to_deemed == 0 and r[5] == "PENDING":
+            flags.append("overdue")
+        elif days_to_deemed <= 3 and r[5] == "PENDING":
+            flags.append("due_soon")
+        rows.append({
+            "id": r[0],
+            "application_no": r[1],
+            "applicant_name": r[2],
+            "block": r[3],
+            "status": r[5],
+            "days_pending": days_pending,
+            "days_to_deemed_approval": days_to_deemed,
+            "flags": flags,
+        })
+    cur.close(); conn.close()
+
+    next_cursor = str(rows[-1]["id"]) if len(rows) == limit else None
+    return _response(
+        True, "ok", "%d matching applications found." % len(rows),
+        data={"applications": rows, "count": len(rows), "next_cursor": next_cursor},
         next_step="Call get_application with an application_no to see details.",
     )
 
@@ -986,7 +1115,8 @@ def officer_get_application(app_no):
         cur.close(); conn.close()
         return _err("not_found", "Application %s not found." % app_no, status=404)
 
-    app_dict = _app_to_dict(row, cols, mask_account=True)
+    # Full unmasked bank account for officer case review
+    app_dict = _app_to_dict(row, cols, mask_account=False)
 
     # Audit trail
     cur.execute(
@@ -1081,22 +1211,42 @@ def officer_decide_application(app_no):
     if not confirm:
         return _err("confirm_required",
                     "Pass confirm=true to confirm the decision.",
+                    problems=[{"field": "confirm",
+                               "plain": "Pass confirm=true to confirm the decision."}],
                     next_step="Ask the officer to confirm the decision.")
 
     conn = _get_db()
     cur = conn.cursor()
 
-    # Look up the application id
-    cur.execute("SELECT id FROM applications WHERE application_no=%s", (app_no,))
+    # 1. Idempotency & existence check: is the application already decided?
+    cur.execute(
+        "SELECT id, status, decided_by, decided_at FROM applications WHERE application_no=%s",
+        (app_no,),
+    )
     row = cur.fetchone()
     if not row:
         cur.close(); conn.close()
         return _err("not_found", "Application %s not found." % app_no, status=404)
 
-    app_id = row[0]
+    app_id, current_status, decided_by, decided_at = row
+    if current_status != "PENDING":
+        cur.close(); conn.close()
+        decided_by_str = decided_by or "unknown"
+        decided_at_str = decided_at.strftime("%Y-%m-%d %H:%M:%S") if decided_at else "unknown date"
+        return _err(
+            "already_decided",
+            f"Application {app_no} is already {current_status} by {decided_by_str} on {decided_at_str}. Only a pending application can be decided.",
+            data={
+                "application_no": app_no,
+                "status": current_status,
+                "decided_by": decided_by_str,
+                "decided_at": decided_at_str,
+            },
+            next_step="No further action needed for this application.",
+        )
 
     from services.applications import decide_application as svc_decide, verify_checks
-    # Check for hard failures and ensure note acknowledges them if approving
+    # 2. Check flags and require acknowledged_flags on approval
     cur.execute(
         "SELECT id, application_no, applicant_name, mobile, dob, gender, "
         "marital_status, village, block, bank_account, ifsc, doc_path, "
@@ -1109,29 +1259,27 @@ def officer_decide_application(app_no):
     app_row = cur.fetchone()
     app_dict = dict(zip(cols, app_row)) if app_row else {}
 
-    if app_dict:
+    if app_dict and decision == "APPROVED":
         checks = verify_checks(cur, app_dict)
-        if decision == "APPROVED" and checks["hard_failures"]:
-            # The note must mention the flags
-            flags_mentioned = all(
-                flag.replace("_", " ") in note.lower() or flag in note.lower()
-                for flag in checks["hard_failures"]
-            )
-            if not flags_mentioned:
+        reported_flags = checks.get("flags") or []
+        if reported_flags:
+            raw_ack = body.get("acknowledged_flags") or []
+            if not isinstance(raw_ack, list):
+                raw_ack = [str(raw_ack)]
+            ack_set = {str(x).strip().lower() for x in raw_ack}
+            missing = [f for f in reported_flags if f.strip().lower() not in ack_set]
+            if missing:
                 cur.close(); conn.close()
                 return _err(
                     "acknowledge_flags",
-                    "This application has issues (%s). "
-                    "Your approval note must acknowledge them."
-                    % ", ".join(checks["hard_failures"]),
-                    problems=[{"field": "note",
-                               "plain": "Please mention the issues in your reason."}],
-                    next_step="Update your note to acknowledge: "
-                              + ", ".join(checks["hard_failures"]),
+                    f"Application has flags ({', '.join(reported_flags)}). Approval is refused unless all flags are listed in acknowledged_flags and a reason is provided.",
+                    data={"reported_flags": reported_flags, "missing_flags": missing},
+                    problems=[{"field": "acknowledged_flags", "plain": f"Missing acknowledged flags: {', '.join(missing)}"}],
+                    next_step=f"Pass acknowledged_flags={reported_flags} with your reason to approve.",
                 )
 
-    # Add provenance to note
-    full_note = ("via officer assistant | " + note)[:500]
+    # 3. Add provenance to note (prefixed with 'via officer assistant: ')
+    full_note = ("via officer assistant: " + note)[:500]
     result = svc_decide(cur, app_id, decision, username, full_note)
 
     if not result["ok"]:
