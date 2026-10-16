@@ -814,6 +814,23 @@ def smoke_all(cfg: SmokeConfig) -> bool:
                 else:
                     _ok(f"whoami response contains mobile {cfg.mobile!r}")
 
+            # Citizen tools checks (modern)
+            scheme_res = check(
+                "get_scheme_info (modern 2026-07-28)",
+                call_tool, citizen_mcp, citizen_tok.access_token, "get_scheme_info",
+            )
+            if scheme_res:
+                stext = _extract_text(scheme_res)
+                _info(f"get_scheme_info → {stext[:80]}...")
+
+            status_res = check(
+                "get_my_status (modern 2026-07-28)",
+                call_tool, citizen_mcp, citizen_tok.access_token, "get_my_status",
+            )
+            if status_res:
+                stext = _extract_text(status_res)
+                _info(f"get_my_status → {stext[:80]}...")
+
             # 4b. Citizen whoami via LEGACY handshake (2025-11-25)
             print(f"\n4b. Citizen whoami via LEGACY handshake (2025-11-25)")
             legacy_result = check(
@@ -829,6 +846,12 @@ def smoke_all(cfg: SmokeConfig) -> bool:
                     all_ok = False
                 else:
                     _ok(f"legacy whoami response contains mobile {cfg.mobile!r}")
+
+            check(
+                "get_scheme_info (legacy 2025-11-25)",
+                check_legacy_handshake,
+                citizen_mcp, citizen_tok.access_token, "get_scheme_info",
+            )
 
     # 5. Officer full flow (modern + legacy paths)
     officer_tok: TokenResult | None = None
