@@ -41,10 +41,7 @@ services:
   migrate:
     image: postgres:15
     restart: "no"
-    command: >
-      sh -c "until pg_isready -h db -U sewasetu; do sleep 2; done;
-             psql postgresql://sewasetu:sewasetu123@db/sewasetu
-             -f /migrations.sql"
+    command: ["sh", "-c", "until pg_isready -h db -U sewasetu; do sleep 2; done; psql -v ON_ERROR_STOP=1 postgresql://sewasetu:sewasetu123@db/sewasetu -f /migrations.sql"]
     volumes:
       - ./app/migrations.sql:/migrations.sql:ro
     depends_on:
