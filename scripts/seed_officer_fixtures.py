@@ -85,7 +85,7 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
             WHERE application_id IN (SELECT id FROM applications WHERE mobile = ANY(%s))
                OR actor = ANY(%s)
             """,
-            (MARKER_MOBILES, [f"citizen:{m}" for m in MARKER_MOBILES]),
+            (MARKER_MOBILES, [f"applicant:{m}" for m in MARKER_MOBILES] + [f"citizen:{m}" for m in MARKER_MOBILES]),
         )
         cur.execute(
             "DELETE FROM applications WHERE mobile = ANY(%s)",
@@ -128,8 +128,8 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "decided_at": None,
                 "decided_by": None,
                 "audit_action": "SUBMIT",
-                "audit_actor": "citizen:9990000060",
-                "audit_note": "Application submitted via citizen assistant",
+                "audit_actor": "applicant:9990000060",
+                "audit_note": "via citizen assistant",
             },
             # 2. Clean pending 2 (5 days ago)
             {
@@ -149,8 +149,8 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "decided_at": None,
                 "decided_by": None,
                 "audit_action": "SUBMIT",
-                "audit_actor": "citizen:9990000061",
-                "audit_note": "Application submitted via citizen assistant",
+                "audit_actor": "applicant:9990000061",
+                "audit_note": "via citizen assistant",
             },
             # 3. Clean pending 3 (4 days ago)
             {
@@ -170,8 +170,8 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "decided_at": None,
                 "decided_by": None,
                 "audit_action": "SUBMIT",
-                "audit_actor": "citizen:9990000062",
-                "audit_note": "Application submitted via citizen assistant",
+                "audit_actor": "applicant:9990000062",
+                "audit_note": "via citizen assistant",
             },
             # 4. Clean pending 4 (3 days ago)
             {
@@ -191,8 +191,8 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "decided_at": None,
                 "decided_by": None,
                 "audit_action": "SUBMIT",
-                "audit_actor": "citizen:9990000063",
-                "audit_note": "Application submitted via citizen assistant",
+                "audit_actor": "applicant:9990000063",
+                "audit_note": "via citizen assistant",
             },
             # 5. Clean pending 5 (2 days ago)
             {
@@ -212,8 +212,8 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "decided_at": None,
                 "decided_by": None,
                 "audit_action": "SUBMIT",
-                "audit_actor": "citizen:9990000064",
-                "audit_note": "Application submitted via citizen assistant",
+                "audit_actor": "applicant:9990000064",
+                "audit_note": "via citizen assistant",
             },
             # 6. Clean pending 6 (1 day ago)
             {
@@ -233,8 +233,8 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "decided_at": None,
                 "decided_by": None,
                 "audit_action": "SUBMIT",
-                "audit_actor": "citizen:9990000065",
-                "audit_note": "Application submitted via citizen assistant",
+                "audit_actor": "applicant:9990000065",
+                "audit_note": "via citizen assistant",
             },
             # 7. Under 60 at submission (age 59)
             {
@@ -254,8 +254,8 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "decided_at": None,
                 "decided_by": None,
                 "audit_action": "SUBMIT",
-                "audit_actor": "citizen:9990000066",
-                "audit_note": "Application submitted via citizen assistant",
+                "audit_actor": "applicant:9990000066",
+                "audit_note": "via citizen assistant",
             },
             # 8. Bad IFSC (UTBI0PUR2819 - 12 chars)
             {
@@ -275,8 +275,8 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "decided_at": None,
                 "decided_by": None,
                 "audit_action": "SUBMIT",
-                "audit_actor": "citizen:9990000067",
-                "audit_note": "Application submitted via citizen assistant",
+                "audit_actor": "applicant:9990000067",
+                "audit_note": "via citizen assistant",
             },
             # 9. Same bank account on different mobile (shares with 9990000064 Tarun Saikia)
             {
@@ -296,8 +296,8 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "decided_at": None,
                 "decided_by": None,
                 "audit_action": "SUBMIT",
-                "audit_actor": "citizen:9990000068",
-                "audit_note": "Application submitted via citizen assistant",
+                "audit_actor": "applicant:9990000068",
+                "audit_note": "via citizen assistant",
             },
             # 10. Prompt injection in village field
             {
@@ -317,8 +317,8 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "decided_at": None,
                 "decided_by": None,
                 "audit_action": "SUBMIT",
-                "audit_actor": "citizen:9990000069",
-                "audit_note": "Application submitted via citizen assistant",
+                "audit_actor": "applicant:9990000069",
+                "audit_note": "via citizen assistant",
             },
             # 11. Aged 14 days (due for deemed approval in 1 day)
             {
@@ -338,10 +338,10 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "decided_at": None,
                 "decided_by": None,
                 "audit_action": "SUBMIT",
-                "audit_actor": "citizen:9990000070",
-                "audit_note": "Application submitted via citizen assistant",
+                "audit_actor": "applicant:9990000070",
+                "audit_note": "via citizen assistant",
             },
-            # 12. Aged 16 days (DEEMED_APPROVED by RTPS-AUTO)
+            # 12. Aged 16 days (DEEMED_APPROVED by RTPS-AUTO) - History: SUBMIT then DEEMED_APPROVED in date order
             {
                 "app_no": "SSP26990071",
                 "name": "Hemanta Biswa",
@@ -358,9 +358,9 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "submitted_at": now_ist - timedelta(days=16, hours=2),
                 "decided_at": now_ist - timedelta(days=1, hours=2),
                 "decided_by": "RTPS-AUTO",
-                "audit_action": "DEEMED_APPROVED",
-                "audit_actor": "system:rtps-cron",
-                "audit_note": "Statutory deemed approval (15 days expired)",
+                "audit_action": "SUBMIT",
+                "audit_actor": "applicant:9990000071",
+                "audit_note": "via citizen assistant",
             },
             # 13. Same name + DOB on different mobile (shares with 9990000061 Maya Devi)
             {
@@ -380,8 +380,8 @@ def seed_fixtures(db_url: str, upload_dir: str) -> dict[str, int]:
                 "decided_at": None,
                 "decided_by": None,
                 "audit_action": "SUBMIT",
-                "audit_actor": "citizen:9990000072",
-                "audit_note": "Application submitted via citizen assistant",
+                "audit_actor": "applicant:9990000072",
+                "audit_note": "via citizen assistant",
             },
         ]
 
