@@ -295,3 +295,36 @@ Cross-channel and integration tests (same file):
 | Web flow → `get_my_status` | DB-inserted row returned by MCP tool |
 | Assamese name `নির্মলা ভরালী` | DB read-back is byte-identical; `get_my_status` returns it |
 | `end_my_session` revocation | `assistant_signouts` row created; `revoked_at > token.iat` |
+
+---
+
+## 2026-10-16 — Prompt 5: Officer MCP Server (`officer_mcp/`)
+
+### 1. Scheduler Timezone & Statutory Deemed Approval
+- **Container Environment:** The host and container timezone is UTC (`UTC +0000`).
+- **Cron Schedule:** The deemed-approval job defined in `app/deploy/crontab` is `0 2 * * *`, executing at **02:00 UTC** (which corresponds to **07:30 IST**).
+- **Parity in Instructions & Tools:** The officer instructions and `days_to_deemed_approval` descriptions explicitly reflect "nightly at 02:00 UTC (07:30 IST)".
+
+### 2. Keyed HMAC Confirmation Code
+The confirmation code generated during `preview_application` is an HMAC-SHA256 signature using `CONFIRMATION_HMAC_SECRET` (or `current_app.secret_key`). It binds all draft fields, applicant mobile, uploaded document identity, and scheme facts, expiring in 30 minutes. Any modification to draft fields or document invalidates the code.
+
+### 3. Preserving `one_active_per_mobile` Constraint
+- The partial unique index `one_active_per_mobile` in `app/migrations.sql` is strictly preserved with no marker-mobile carve-outs in production.
+- The `other_active_application` flag is verified in automated unit/integration tests (`tests/officer_mcp/test_officer_server.py`) by dropping the index inside the isolated test database transaction and recreating it immediately after.
+- Live fixtures in `scripts/seed_officer_fixtures.py` verify duplicate detection using rules the index does not block:
+  - `same_account_elsewhere`: couples sharing a bank account on different mobiles (e.g. mobile `9990000068` shares account with `9990000064`).
+  - `same_name_dob_elsewhere`: coincident identical name and DOB on different mobiles (e.g. mobile `9990000072` shares with `9990000061`).
+
+### 4. `acknowledged_flags` Enforcement on Approval
+- `decide_application` requires `decision`, `note` (the officer's explanation in their own words), and `confirm=True`.
+- If `verify_application` reports any flags (such as `age_at_submission`, `ifsc_format`, `account_format`, `document_present`, `block_valid`, `same_account_elsewhere`), an approval decision is refused with `acknowledge_flags` error unless every reported flag code is explicitly passed in `acknowledged_flags`.
+- Rejections require only a clear explanation in `note` without needing flag acknowledgments.
+
+### 5. Provenance in Audit Trail & Unprefixed Citizen Visibility
+- Every decision made via the officer MCP server records an audit log row with actor `admin:<username>` and note prefixed with `"via officer assistant: <reason>"`.
+- When an applicant checks their application status via citizen MCP `get_my_status`, `citizen_status` strips the `"via officer assistant: "` prefix so the citizen sees only the officer's respectful, clean explanation.
+
+### 6. Public SMS Gateway Hardening
+- The public `/__gateway/*` proxy on the web portal allows only `GET` requests; all other HTTP methods return 405 Method Not Allowed.
+- The internal SMS gateway endpoint `DELETE /api/messages` enforces marker mobile regex `^99900000(0[1-9]|[1-9][0-9])$` (HTTP 403 Forbidden for non-marker mobiles).
+
