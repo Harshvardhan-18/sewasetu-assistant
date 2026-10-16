@@ -58,10 +58,18 @@ def send():
     return jsonify({"status": "queued", "id": msg["id"]})
 
 
-@app.route("/api/messages")
+@app.route("/api/messages", methods=["GET", "DELETE"])
 def messages():
-    # Inbox query for a given number. Used to read delivered OTPs/SMS.
+    global MESSAGES
     to = request.args.get("to", "")
+    if request.method == "DELETE":
+        if not to:
+            return jsonify({"status": "error", "reason": "to param required"}), 400
+        before = len(MESSAGES)
+        MESSAGES = [m for m in MESSAGES if m.get("to") != to]
+        return jsonify({"status": "deleted", "count": before - len(MESSAGES)})
+
+    # Inbox query for a given number. Used to read delivered OTPs/SMS.
     now = time.time()
     out = []
     for m in MESSAGES:
