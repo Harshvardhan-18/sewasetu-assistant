@@ -109,21 +109,50 @@ def run_officer_flow(
     )
     print(f"  decide_application result: ok={dec_res1.get('ok')}, message='{dec_res1.get('message_for_user')}'")
 
-    # 6. Review & Approve SSP26990061 (clean pending)
-    print("\n[Step 6] Adjudicating SSP26990061 (Clean application)...")
+    # 6. Flagged application SSP26990061: Refusal without acknowledged_flags, then Approval with acknowledged_flags
+    print("\n[Step 6] Adjudicating SSP26990061 (Flagged with same_name_dob_elsewhere)...")
     ver_res2 = _call("verify_application", {"application_no": "SSP26990061"})
     print(f"  verify_application: flags={ver_res2.get('data', {}).get('flags')}, recommendation={ver_res2.get('data', {}).get('recommendation')}")
 
-    dec_res2 = _call(
+    print("  6a. Attempting approval WITHOUT acknowledged_flags (expected refusal)...")
+    dec_unack = _call(
         "decide_application",
         {
             "application_no": "SSP26990061",
             "decision": "APPROVED",
-            "note": "Voter ID age proof verified and bank account confirmed.",
+            "note": "Approving without acknowledging flags",
             "confirm": True,
         },
     )
-    print(f"  decide_application result: ok={dec_res2.get('ok')}, message='{dec_res2.get('message_for_user')}'")
+    print(f"  Result: ok={dec_unack.get('ok')}, message='{dec_unack.get('message_for_user')}'")
+
+    print("  6b. Approving WITH acknowledged_flags=['same_name_dob_elsewhere']...")
+    dec_ack = _call(
+        "decide_application",
+        {
+            "application_no": "SSP26990061",
+            "decision": "APPROVED",
+            "note": "Coincident name and DOB verified in person; applicant identity confirmed.",
+            "confirm": True,
+            "acknowledged_flags": ["same_name_dob_elsewhere"],
+        },
+    )
+    print(f"  Result: ok={dec_ack.get('ok')}, message='{dec_ack.get('message_for_user')}'")
+
+    # 6c. Approve clean pending SSP26990062 (Ramesh Kalita, no flags)
+    print("\n[Step 6c] Adjudicating SSP26990062 (Clean pending application)...")
+    ver_res2c = _call("verify_application", {"application_no": "SSP26990062"})
+    print(f"  verify_application: flags={ver_res2c.get('data', {}).get('flags')}, recommendation={ver_res2c.get('data', {}).get('recommendation')}")
+    dec_clean2 = _call(
+        "decide_application",
+        {
+            "application_no": "SSP26990062",
+            "decision": "APPROVED",
+            "note": "All documents verified and applicant meets age requirement.",
+            "confirm": True,
+        },
+    )
+    print(f"  Result: ok={dec_clean2.get('ok')}, message='{dec_clean2.get('message_for_user')}'")
 
     # 7. Review & Reject SSP26990067 (bad IFSC)
     print("\n[Step 7] Adjudicating SSP26990067 (Bad IFSC)...")
