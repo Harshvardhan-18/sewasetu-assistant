@@ -464,17 +464,83 @@ _MODERN_META: dict = {
 }
 
 
-def _parse_sse_or_json(text: str) -> Any:
-    """Extract JSON-RPC payload from SSE `data:` lines or a plain JSON body."""
-    text = text.strip()
-    if text.startswith("data:"):
-        for line in text.splitlines():
+def _parse_sse_or_json(text: str, expected_id: int | str | None = None) -> Any:
+    """Extract JSON-RPC payload from SSE `data:` lines or a plain JSON body.
+
+    Handles both application/json and text/event-stream responses (including \r\n,
+    event: message headers, comments, multiple events, and matching the response by id).
+    """
+    stripped = text.strip()
+    if not stripped:
+        raise ValueError("Empty response body")
+
+    # 1. Try direct JSON parse first (fast path for application/json)
+    if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith("[") and stripped.endswith("]")):
+        try:
+            data = json.loads(stripped)
+            if expected_id is None:
+                return data
+            if isinstance(data, dict) and (data.get("id") == expected_id or str(data.get("id")) == str(expected_id)):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Parse as SSE stream
+    # Handle \r\n, \r, and \n uniformly
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    candidates: list[dict[str, Any]] = []
+
+    # First approach: parse event blocks separated by double newlines (\n\n)
+    blocks = [b.strip() for b in normalized.split("\n\n") if b.strip()]
+    for block in blocks:
+        data_parts: list[str] = []
+        for line in block.split("\n"):
             line = line.strip()
             if line.startswith("data:"):
-                payload = line[5:].strip()
+                # Strip 'data:' and optional leading space
+                payload = line[5:].lstrip(" ")
+                data_parts.append(payload)
+        if data_parts:
+            combined = "\n".join(data_parts).strip()
+            if combined:
+                try:
+                    parsed = json.loads(combined)
+                    if isinstance(parsed, dict):
+                        candidates.append(parsed)
+                except json.JSONDecodeError:
+                    pass
+
+    # Second approach (fallback if block splitting didn't yield candidates):
+    # scan every data: line individually
+    if not candidates:
+        for line in normalized.split("\n"):
+            line = line.strip()
+            if line.startswith("data:"):
+                payload = line[5:].lstrip(" ")
                 if payload:
-                    return json.loads(payload)
-    return json.loads(text)
+                    try:
+                        parsed = json.loads(payload)
+                        if isinstance(parsed, dict):
+                            candidates.append(parsed)
+                    except json.JSONDecodeError:
+                        pass
+
+    # 3. Match response by ID if expected_id is specified
+    if expected_id is not None:
+        for item in candidates:
+            if item.get("id") == expected_id or str(item.get("id")) == str(expected_id):
+                return item
+
+    # If expected_id wasn't found or not specified, but we have candidates:
+    if candidates:
+        for item in reversed(candidates):
+            if "result" in item or "error" in item:
+                return item
+        return candidates[-1]
+
+    # 4. Final fallback: try raw json.loads
+    return json.loads(stripped)
 
 
 def call_tool(
@@ -520,7 +586,7 @@ def call_tool(
         body = e.read().decode(errors="replace")
         raise RuntimeError(f"tools/call failed HTTP {e.code}: {body[:500]}")
 
-    return _parse_sse_or_json(raw)
+    return _parse_sse_or_json(raw, expected_id=1)
 
 
 def check_legacy_handshake(mcp_url: str, access_token: str, tool_name: str = "whoami") -> Any:
@@ -552,7 +618,11 @@ def check_legacy_handshake(mcp_url: str, access_token: str, tool_name: str = "wh
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
         raise RuntimeError(f"legacy initialize failed HTTP {e.code}: {body[:400]}")
-    _info(f"  legacy initialize response (first 120 chars): {init_raw[:120]!r}")
+
+    init_data = _parse_sse_or_json(init_raw, expected_id=1)
+    if isinstance(init_data, dict) and "error" in init_data:
+        raise RuntimeError(f"legacy initialize returned error: {init_data['error']}")
+    _info("  legacy initialize OK")
 
     # tools/call (legacy path uses plain params, no _meta)
     call_payload = json.dumps({
@@ -569,7 +639,7 @@ def check_legacy_handshake(mcp_url: str, access_token: str, tool_name: str = "wh
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
         raise RuntimeError(f"legacy tools/call failed HTTP {e.code}: {body[:400]}")
-    return _parse_sse_or_json(raw)
+    return _parse_sse_or_json(raw, expected_id=2)
 
 
 # ── Unauthenticated 401 check ─────────────────────────────────────────────────
@@ -737,12 +807,28 @@ def smoke_all(cfg: SmokeConfig) -> bool:
             )
             if result:
                 text = _extract_text(result)
-                _info(f"whoami → {text!r}")
+                _info(f"whoami (modern) → {text!r}")
                 if cfg.mobile not in text:
                     _fail(f"mobile {cfg.mobile!r} not found in whoami response")
                     all_ok = False
                 else:
                     _ok(f"whoami response contains mobile {cfg.mobile!r}")
+
+            # 4b. Citizen whoami via LEGACY handshake (2025-11-25)
+            print(f"\n4b. Citizen whoami via LEGACY handshake (2025-11-25)")
+            legacy_result = check(
+                "whoami (legacy 2025-11-25, initialize → tools/call)",
+                check_legacy_handshake,
+                citizen_mcp, citizen_tok.access_token, "whoami",
+            )
+            if legacy_result:
+                legacy_text = _extract_text(legacy_result)
+                _info(f"whoami (legacy) → {legacy_text!r}")
+                if cfg.mobile not in legacy_text:
+                    _fail(f"mobile {cfg.mobile!r} not found in legacy whoami response")
+                    all_ok = False
+                else:
+                    _ok(f"legacy whoami response contains mobile {cfg.mobile!r}")
 
     # 5. Officer full flow (modern + legacy paths)
     officer_tok: TokenResult | None = None
@@ -785,6 +871,11 @@ def smoke_all(cfg: SmokeConfig) -> bool:
             if legacy_result:
                 legacy_text = _extract_text(legacy_result)
                 _info(f"whoami (legacy) → {legacy_text!r}")
+                if cfg.admin_username not in legacy_text:
+                    _fail(f"username {cfg.admin_username!r} not in legacy whoami response")
+                    all_ok = False
+                else:
+                    _ok(f"legacy whoami response contains username {cfg.admin_username!r}")
 
     # 6. Refresh tokens
     print("\n6. Refresh tokens")
