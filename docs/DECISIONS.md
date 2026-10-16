@@ -184,3 +184,114 @@ clients that send `2025-11-25` or earlier will work without any server change.
 **Sources read:** `mcp/server/streamable_http_manager.py` L183-204,
 `mcp/server/_streamable_http_modern.py`, `mcp/shared/inbound.py`
 `classify_inbound_request()`, `mcp_types.version` constants.
+
+---
+
+## 2026-10-16 — Prompt 4+5: Citizen MCP, Age Proof, Uploads, Confirmation Code
+
+### Age-Proof Validation (`app/services/proof.py`)
+
+All age-proof logic lives in `app/services/proof.py`:
+
+- **`detect_and_validate_file(data: bytes, declared_ext: str) -> str`** — Reads the first 8 magic
+  bytes and matches against a whitelist of PDF (`%PDF-`), JPEG (`FF D8 FF`), and PNG (`89 50 4E 47`)
+  signatures. Rejects any file that does not match, regardless of the client-supplied filename or
+  Content-Type. Maximum size is 5 MB (enforced before calling this).
+- **`save_proof_file(data: bytes, display_name: str) -> str`** — Generates a random UUID-based
+  server-side filename, strips the client-supplied name to a safe ASCII-only display name for the
+  draft, and writes to the upload directory. The client filename is never used on disk.
+- **`fetch_file_url(url: str) -> bytes`** — HTTPS-only fetch with SSRF guards:
+  1. URL must use the `https://` scheme.
+  2. Resolves the hostname to IP(s); blocks all RFC-1918/loopback/link-local/metadata ranges
+     (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, ::1, fc00::/7).
+  3. Pins the resolved IP to the socket before connecting (defends against DNS rebinding).
+  4. No redirects; hard 10-second timeout; 5 MB byte cap.
+
+### Confirmation Code Design (`assistant_drafts` table)
+
+The confirmation code binds the full draft snapshot to prevent substitution attacks:
+
+```
+code = SHA-256(mobile || applicant_name || dob || gender || marital_status ||
+               village || block || bank_account || ifsc ||
+               doc_path || doc_display_name || scheme_window_closes_at)[:24]  # hex prefix
+```
+
+- **Storage:** `assistant_drafts.confirmation_hash` (the hash) and `confirmation_expires_at`
+  (30 minutes from when `preview_application` was called).
+- **Invalidation:** Any call to `save_application_draft` or `attach_age_proof` clears
+  `confirmation_hash` and `confirmation_expires_at` in the draft row.
+- **Idempotency:** A successful `submit_application` inserts a row in `assistant_submissions`
+  keyed on `(mobile, confirmation_hash)`. A second call with the same code finds the existing
+  row and returns the original `application_no` without creating a duplicate.
+- **Expiry:** `submit_application` rejects codes where `confirmation_expires_at < now()`.
+
+### `/upload/*` Public Route and Controls
+
+`/upload/direct` is a public, unauthenticated file-writing route deliberately exposed by Caddy.
+It is guarded by a single-use DB token in `assistant_upload_tokens`:
+
+| Control | Detail |
+|---|---|
+| Token binding | `mobile` column; token for mobile A cannot be used for mobile B |
+| Single-use | `used_at` column; first use stamps it; reuse returns 409 |
+| Expiry | `expires_at = now() + 30 minutes`; checked on every request |
+| File type | Magic-byte check: PDF, JPEG, PNG only |
+| Size cap | 5 MB; enforced before writing |
+| Filename on disk | UUID-generated; client filename never used on disk |
+| Personal data | The `/upload/direct` page shows only the scheme name and the upload form — no name, DOB, mobile, or application details |
+| Write target | Writes only to the draft's `doc_path`; no arbitrary path traversal |
+| Rate limit | 5 token requests per mobile per 10 minutes (enforced in `get_upload_link`) |
+
+Caddy config: `/upload/*` → `app:5000`. `/internal/*` remains blocked at the edge (no backend match).
+
+Tests added in `tests/citizen_mcp/test_server.py`:
+- Reused token → 409
+- Expired token → 410
+- Wrong file type → 400
+- Oversized file → 413
+- Token for mobile A used for mobile B → 403
+
+### Deemed-Approval Count (Live VM, 2026-10-16)
+
+Query: `SELECT status, count(*) FROM applications GROUP BY status ORDER BY status;`
+
+| status | count |
+|---|---|
+| APPROVED | 82 900 |
+| DEEMED_APPROVED | 9 700 |
+| PENDING | 0 (all flipped at first boot) |
+| REJECTED | 7 000 |
+| WITHDRAWN | 400 |
+
+All `DEEMED_APPROVED` rows have `decided_by = 'RTPS-AUTO'`, set by the nightly 02:00 cron
+(`app/scripts/deemed_approval.py`). The cron flips any `PENDING` application that has been
+waiting longer than the RTPS statutory limit (currently 15 days per `app/config/app.ini`).
+
+### Counter-Parity Test Strategy (`tests/citizen_mcp/test_counter_parity.py`)
+
+Rules enforced from the service layer with no DB side-effects:
+
+| Test | Mobile | What is asserted |
+|---|---|---|
+| Age 59 | 9990000040 | `preview_application` returns `ok=False`; 0 rows in `applications` |
+| Turns 60 after window | 9990000041 | Same (skipped if window already passed) |
+| Window closed (monkeypatch) | 9990000042 | `patch.object(svc, "SCHEME_DEADLINE", past)` → `ok=False`; 0 rows |
+| Wrong block | 9990000043 | `ok=False` with "block" in problems; 0 rows |
+| 12-char IFSC (`UTBI0PUR2819`) | 9990000044 | `ok=False` with "ifsc" in problems; 0 rows |
+| Missing age proof | 9990000045 | `ok=False` with "proof/document" in problems; 0 rows |
+| Already PENDING | 9990000046 | Pre-inserted row; submit returns `ok=False`; count stays 1 |
+| Already APPROVED | 9990000047 | Same |
+| Already DEEMED_APPROVED | 9990000048 | Same |
+| REJECTED → re-apply | 9990000049 | Submit succeeds; count becomes 2 |
+| WITHDRAWN → prefilled draft | 9990000050 | `get_my_status` shows `has_draft=True`; corrected resubmit succeeds |
+
+Cross-channel and integration tests (same file):
+
+| Test | Assertion |
+|---|---|
+| MCP submit → web status portal | Application number appears in portal HTML |
+| MCP submit → admin list | Application visible at `/admin/applications?status=PENDING` |
+| Web flow → `get_my_status` | DB-inserted row returned by MCP tool |
+| Assamese name `নির্মলা ভরালী` | DB read-back is byte-identical; `get_my_status` returns it |
+| `end_my_session` revocation | `assistant_signouts` row created; `revoked_at > token.iat` |
