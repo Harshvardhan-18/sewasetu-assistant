@@ -138,7 +138,7 @@ def clean_db(test_db):
             BEGIN
                 TRUNCATE applications, portal_users, otps, audit_log CASCADE;
                 IF EXISTS (SELECT FROM pg_tables WHERE tablename = 'assistant_drafts') THEN
-                    TRUNCATE assistant_drafts, assistant_signouts CASCADE;
+                    TRUNCATE assistant_drafts, assistant_signouts, assistant_upload_tokens, assistant_submissions CASCADE;
                 END IF;
             END $$;
         """)

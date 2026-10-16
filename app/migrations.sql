@@ -35,3 +35,26 @@ CREATE TABLE IF NOT EXISTS assistant_signouts (
     subject    VARCHAR(80) PRIMARY KEY,
     revoked_at TIMESTAMP   NOT NULL
 );
+
+-- ── assistant_drafts additions: confirmation expiry ────────────────────────
+ALTER TABLE assistant_drafts ADD COLUMN IF NOT EXISTS confirmation_expires_at TIMESTAMP;
+
+-- ── assistant_upload_tokens: single-use, 30m mobile upload tokens ───────────
+CREATE TABLE IF NOT EXISTS assistant_upload_tokens (
+    token      VARCHAR(64) PRIMARY KEY,
+    mobile     VARCHAR(15) NOT NULL,
+    created_at TIMESTAMP   NOT NULL DEFAULT now(),
+    expires_at TIMESTAMP   NOT NULL,
+    used_at    TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_upload_tokens_mobile ON assistant_upload_tokens(mobile);
+
+-- ── assistant_submissions: idempotency store for submitted confirmation codes 
+CREATE TABLE IF NOT EXISTS assistant_submissions (
+    confirmation_code VARCHAR(64) PRIMARY KEY,
+    mobile            VARCHAR(15) NOT NULL,
+    application_no    VARCHAR(32) NOT NULL,
+    application_id    INT         NOT NULL REFERENCES applications(id),
+    submitted_at      TIMESTAMP   NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_submissions_mobile ON assistant_submissions(mobile);
