@@ -28,7 +28,7 @@ import psycopg2
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from scripts.oauth_smoke import (
-    _run_pkce_dcr_flow,
+    obtain_token,
     call_tool,
 )
 
@@ -49,7 +49,7 @@ def run_officer_flow(
 
     # 1. OAuth login for officer
     print("\n[Step 1] Authenticating officer via OAuth 2.1 PKCE + DCR...")
-    tok = _run_pkce_dcr_flow(
+    tok = obtain_token(
         portal_base=host,
         canonical_url=officer_mcp,
         role="officer",
