@@ -328,6 +328,9 @@ async def withdraw_application(application_no: str, confirm: bool) -> dict:
 )
 async def end_my_session() -> dict:
     resp = await client.post("/me/session/end")
+    sub = current_subject()
+    if sub and hasattr(app, "token_verifier"):
+        app.token_verifier._session_cache.pop(sub, None)
     return envelope(
         ok=resp.get("ok", True),
         message_for_user=resp.get("message_for_user", ""),

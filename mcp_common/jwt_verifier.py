@@ -110,7 +110,8 @@ class PortalTokenVerifier(TokenVerifier):
         cached = self._session_cache.get(subject)
         if cached:
             revoked_epoch, cached_at = cached
-            if now - cached_at < self.session_cache_ttl:
+            ttl = self.session_cache_ttl if revoked_epoch is not None else 1.0
+            if now - cached_at < ttl:
                 if revoked_epoch is not None and token_iat <= revoked_epoch:
                     return False
                 return True
