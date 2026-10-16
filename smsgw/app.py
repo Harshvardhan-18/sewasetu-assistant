@@ -58,13 +58,23 @@ def send():
     return jsonify({"status": "queued", "id": msg["id"]})
 
 
+import re
+
+MARKER_MOBILE_REGEX = re.compile(r"^99900000(0[1-9]|[1-9][0-9])$")
+
+
 @app.route("/api/messages", methods=["GET", "DELETE"])
 def messages():
     global MESSAGES
-    to = request.args.get("to", "")
+    to = request.args.get("to", "").strip()
     if request.method == "DELETE":
         if not to:
             return jsonify({"status": "error", "reason": "to param required"}), 400
+        if not MARKER_MOBILE_REGEX.match(to):
+            return jsonify({
+                "status": "error",
+                "reason": "refused: DELETE permitted only for marker mobiles 9990000001-9990000099",
+            }), 403
         before = len(MESSAGES)
         MESSAGES = [m for m in MESSAGES if m.get("to") != to]
         return jsonify({"status": "deleted", "count": before - len(MESSAGES)})
