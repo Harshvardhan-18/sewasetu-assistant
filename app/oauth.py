@@ -236,6 +236,24 @@ def load_client(client_id):
     return None
 
 
+@oauth.get("/oauth/client-metadata.json")
+def client_metadata():
+    """Client ID Metadata Document endpoint (RFC 7591 / OAuth draft)."""
+    doc_url = request.base_url
+    return jsonify({
+        "client_id": doc_url,
+        "client_name": "Sewa Setu Client ID Metadata Document Client",
+        "redirect_uris": [
+            "http://localhost/callback",
+            "http://localhost:8000/callback",
+            "http://127.0.0.1/callback",
+        ],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    })
+
+
 @oauth.post("/oauth/register")
 def register():
     body = request.get_json(silent=True) or {}
