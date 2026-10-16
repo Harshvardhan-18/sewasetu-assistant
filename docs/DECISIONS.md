@@ -123,3 +123,64 @@ Before building `mcp_common`, we reviewed the official documentation and source 
   - Because we do not control the client's system prompt in evaluations, all operational rules, personas, language policies, and kiosk sign-out procedures must be encoded directly in the server `instructions`.
 
 
+
+---
+
+## 2026-10-16 — Prompt 3 context: MCP protocol version routing (oauth_smoke fixes)
+
+### Problem 1: stale OTP picked from SMS gateway
+
+`_fetch_otp()` polled the gateway and matched any recent message for the mobile
+number. On a retried smoke run the OTP from the *previous* attempt was still in
+the gateway and had a newer timestamp than "5 seconds ago", so it was accepted
+before the new OTP arrived.
+
+**Fix:** Record the total message count (`_count_gateway_messages()`) as a
+watermark *before* triggering the OTP request. In the polling loop, a message is
+only considered new when the total list length exceeds the watermark **or** the
+message timestamp is ≥ `t_before - 5s`. This is robust even when the gateway
+does not return parseable timestamps.
+
+### Problem 2: `initialize` rejected on the 2026-07-28 modern path
+
+**Root cause (read from SDK source `mcp==2.2.0`):**
+
+`StreamableHTTPSessionManager._handle_request()` routes based on the
+`MCP-Protocol-Version` HTTP header:
+
+| Header value | Handler | What it expects |
+|---|---|---|
+| `2026-07-28` (or anything not in handshake list) | `handle_modern_request` | No `initialize`. Every POST is self-contained and must carry `params._meta` with `"io.modelcontextprotocol/protocolVersion"` and `"io.modelcontextprotocol/clientCapabilities"`. |
+| `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05` (handshake list), or **absent** | Legacy stateless or stateful handler | Standard `initialize` → `tools/call` flow. |
+
+`HANDSHAKE_PROTOCOL_VERSIONS = ('2024-11-05','2025-03-26','2025-06-18','2025-11-25')`
+`MODERN_PROTOCOL_VERSIONS = ('2026-07-28',)`
+
+The classifier `classify_inbound_request()` (in `mcp.shared.inbound`) runs the
+"ladder" and **rejects** any request body that lacks the `_meta` envelope:
+
+```
+params._meta must be an object carrying the required
+'io.modelcontextprotocol/protocolVersion' and
+'io.modelcontextprotocol/clientCapabilities' envelope keys
+```
+
+This is the exact 400 error seen when `oauth_smoke.py` sent
+`MCP-Protocol-Version: 2026-07-28` with a plain `initialize` body.
+
+**Fix in `oauth_smoke.py`:**
+- `call_tool()` uses the **modern path**: no `initialize`, sends `tools/call`
+  directly with `params._meta` containing the required envelope.
+- `check_legacy_handshake()` uses the **legacy path** (`2025-11-25`): sends
+  `initialize` then `tools/call` in the standard handshake style.
+- Both paths are exercised in the officer smoke run.
+
+**Server factory unchanged:** `mcp_common/server.py` already works correctly
+for both paths. The `StreamableHTTPSessionManager` routes by header; our servers
+accept `2026-07-28` (via `handle_modern_request`) and all handshake versions
+(via the legacy stateless path). Claude Code, MCP Inspector, and other real
+clients that send `2025-11-25` or earlier will work without any server change.
+
+**Sources read:** `mcp/server/streamable_http_manager.py` L183-204,
+`mcp/server/_streamable_http_modern.py`, `mcp/shared/inbound.py`
+`classify_inbound_request()`, `mcp_types.version` constants.
