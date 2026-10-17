@@ -4,10 +4,11 @@
 import json
 import os
 import sys
+import urllib.request
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from tools.oauth_client import OAuthClient, http_post_json, MODERN_META, MODERN_PROTOCOL_VERSION
+from tools.oauth_client import OAuthClient, parse_sse_or_json, MODERN_META
 
 def main():
     mobile = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "9990000067"
@@ -17,7 +18,6 @@ def main():
     client = OAuthClient(portal_base=host, smsgw_base=smsgw)
     tok = client.obtain_citizen_token(mobile, canonical_url=f"{host}/citizen/mcp")
 
-    # Call get_my_status via Modern Streamable HTTP MCP
     headers = {
         "Authorization": f"Bearer {tok.access_token}",
         "Mcp-Method": "tools/call",
@@ -34,7 +34,16 @@ def main():
             "_meta": MODERN_META,
         },
     }
-    status, res, _ = http_post_json(f"{host}/citizen/mcp", payload, headers=headers)
+    req = urllib.request.Request(
+        f"{host}/citizen/mcp",
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        content = resp.read().decode("utf-8")
+        res = parse_sse_or_json(content)
+
     print(f"GET_MY_STATUS RESULT FOR {mobile}:")
     print(json.dumps(res, indent=2))
 
