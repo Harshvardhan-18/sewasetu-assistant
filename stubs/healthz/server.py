@@ -35,6 +35,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"ok":false,"message":"not implemented yet"}\n')
 
+    def do_HEAD(self):
+        return self.do_GET()
+
     def do_POST(self):
         return self.do_GET()
 

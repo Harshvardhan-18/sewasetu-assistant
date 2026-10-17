@@ -20,7 +20,7 @@ how_they_talk: |
   - "Beta, pension ke liye apply karna hai."
   - "DOB meri 3 March 1955 hai."
   - "Bank account number 98765432101234 hai, SBIN0003077."
-  - "Proof ka photo link deti hoon: https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c01_kamala_aadhar.jpg"
+  - "Proof (voter ID) ka photo link deti hoon: https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c01_kamala_voter_id.jpg"
 
 goal: "Apply for the old-age pension on my own."
 
@@ -33,15 +33,16 @@ private_facts:
   block: Dhemaji Pathar
   bank_account: "98765432101234"
   ifsc: "SBIN0003077"
-  doc_url: "https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c01_kamala_aadhar.jpg"
+  document_type: "voter_id"
+  doc_url: "https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c01_kamala_voter_id.jpg"
   document_available: true
 
 files:
-  c01_kamala_aadhar.jpg: evals/assets/c01_kamala_aadhar.jpg
+  c01_kamala_voter_id.jpg: evals/assets/c01_kamala_voter_id.jpg
 
 fixtures: []  # no pre-existing state needed
 
-turn_budget: 12
+turn_budget: 15
 max_citizen_messages: 15
 
 must_be_true:
