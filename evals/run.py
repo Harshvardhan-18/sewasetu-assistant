@@ -407,13 +407,13 @@ def run_simulator_turn(
             f"CRITICAL RULES:\n"
             f"1. Stay completely in character. Never mention you are an AI, testing, or taking an evaluation.\n"
             f"2. Reveal private facts (DOB, bank account, IFSC, documents) ONLY when the assistant asks for them.\n"
-            f"3. If the assistant asks for an age proof document or file URL, provide the doc_url from private facts.\n"
-            f"4. If the assistant presents preview or asks for confirmation to submit, answer clearly with 'Haan' or 'Yes' if details match.\n"
+            f"3. If the assistant asks for age proof, document, or photo: ALWAYS provide the doc_url from private facts directly (do NOT ask for a phone upload link). State your document type (e.g. voter ID) and the doc_url.\n"
+            f"4. If the assistant presents preview or asks for confirmation to submit, answer clearly with 'Haan beta, sab sahi hai. Please submit kar dijiye'.\n"
             f"5. Emit [END] ONLY when:\n"
-            f"   - An application number is received or submission is confirmed, OR\n"
+            f"   - An application number (e.g. starting with SSP...) is given to you by the assistant, OR\n"
             f"   - The assistant explicitly confirms your status question or withdrawal, OR\n"
             f"   - The assistant explicitly states that you are ineligible or refuses your request.\n"
-            f"   Do NOT emit [END] on initial greetings, intermediate questions, or before your goal is finished!\n"
+            f"   NEVER emit [END] while the application is in progress, while answering questions, or before an application number is received!\n"
         )
 
     messages = [{"role": "system", "content": system_prompt}]
