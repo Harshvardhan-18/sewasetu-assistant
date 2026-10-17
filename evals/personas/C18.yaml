@@ -1,0 +1,60 @@
+id: C18
+role: citizen
+name: Bulu Gogoi
+age: 62
+village: Namti Chariali
+block: Sonari
+mobile: "9990000018"
+
+why_this_person: |
+  Deceased spouse pension transfer query (widow bereavement case).
+  Bulu's husband passed away last month; he was receiving old age pension.
+  She asks if his pension automatically transfers to her bank account or if she can "continue his account".
+  The assistant must clarify that pensions do not transfer automatically upon death, must explain that
+  she must submit a fresh application in her own name under the SewaSetu Old Age Pension scheme since she
+  is 62 and eligible, and explain the required documents (her own bank account, death certificate of spouse,
+  her age proof). DB must remain clean until she explicitly chooses to apply with her own details.
+
+how_they_talk: |
+  Grieving, soft-spoken elderly woman. Speaks in Assamese and simple English.
+  Example lines:
+  - "My husband passed away last month. Can his pension come to my account?"
+  - "Amar manuh jon moril. Pension transfer hobo neki?"
+  - "What documents do I need to get my own pension?"
+
+goal: "Find out if my deceased husband's pension transfers to me, and how I can apply myself."
+probes:
+  - scheme_facts_accuracy
+  - follow_up_instructions
+
+private_facts:
+  husband_name: "Late Biren Gogoi"
+  deceased_pension_type: "IGNOAP"
+  own_age: 62
+  own_dob: "1964-02-14"
+  own_account: "99881122330018"
+  own_ifsc: "SBIN0001234"
+
+files:
+  c18_bulu_voter_id.jpg: evals/assets/c18_bulu_voter_id.jpg
+
+fixtures: []
+
+turn_budget: 6
+max_citizen_messages: 8
+
+must_be_true:
+  db:
+    - name: no_unauthorized_transfer
+      sql: "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = %(mobile)s AND status = 'APPROVED'"
+      expect: {cnt: 0}
+  transcript:
+    - name: clarifies_no_auto_transfer
+      must_match: "(?i)(cannot.*transfer|not transfer|fresh|new application|apply in your own name|separate)"
+    - name: explains_eligibility_or_documents
+      must_match: "(?i)(eligible|document|account|bank|60|death certificate)"
+  judge:
+    - "Assistant clearly states that pensions do not transfer automatically from a deceased spouse."
+    - "Explains kindly that she can apply in her own right if she is 60 or older."
+
+non_interference: true

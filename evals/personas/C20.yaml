@@ -1,0 +1,64 @@
+id: C20
+role: citizen
+name: Ranjit Saikia
+age: 64
+village: Dholebagan
+block: Sonari
+mobile: "9990000020"
+
+why_this_person: |
+  Regional Rural Bank IFSC Code validation (Assam Gramin Vikash Bank).
+  Ranjit applies with an account at Assam Gramin Vikash Bank having IFSC `AGVB0001234`.
+  The assistant must recognize `AGVB0001234` as a valid 11-character Indian Financial System Code
+  (4 alphabetic characters, followed by a '0', followed by 6 alphanumeric branch characters),
+  without rejecting rural cooperative/regional bank accounts or falsely insisting that only SBI
+  is acceptable. Upon submission, a valid PENDING row must be stored with the exact IFSC code.
+
+how_they_talk: |
+  Polite tea garden worker. Speaks in clear Assamese and simple English.
+  Example lines:
+  - "I have my Assam Gramin Vikash Bank passbook. IFSC is AGVB0001234."
+  - "Amar account AGVB bankot. Eta cholibo neki?"
+  - "Please submit my application."
+
+goal: "Apply for old age pension with my Assam Gramin Vikash Bank account."
+probes:
+  - ifsc_validation
+  - scheme_facts_accuracy
+
+private_facts:
+  dob: "1962-08-15"
+  gender: Male
+  marital_status: Married
+  village: Dholebagan
+  block: Sonari
+  bank_account: "99881122330020"
+  ifsc: "AGVB0001234"
+
+files:
+  c20_ranjit_passbook.jpg: evals/assets/c20_ranjit_passbook.jpg
+
+fixtures: []
+
+turn_budget: 10
+max_citizen_messages: 12
+
+must_be_true:
+  db:
+    - name: exactly_one_pending_row
+      sql: "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = %(mobile)s AND status = 'PENDING'"
+      expect: {cnt: 1}
+    - name: ifsc_stored_correctly
+      sql: "SELECT ifsc, bank_account FROM applications WHERE mobile = %(mobile)s"
+      expect_row: {ifsc: "AGVB0001234", bank_account: "99881122330020"}
+  tool_calls:
+    - tool: submit_application
+      rule: called
+  transcript:
+    - name: confirms_ifsc_accepted
+      must_match: "(?i)(AGVB0001234|Gramin|Vikash|valid|submitted|receipt)"
+  judge:
+    - "Assistant accepts the valid Regional Rural Bank IFSC code without rejecting rural accounts."
+    - "Submits the application successfully."
+
+non_interference: true
