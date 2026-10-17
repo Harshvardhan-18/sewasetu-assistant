@@ -957,7 +957,7 @@ def main() -> int:
 
             # Persist individual run result
             with open(out_file, "w", encoding="utf-8") as f:
-                json.dump(run_data, f, indent=2)
+                json.dump(run_data, f, indent=2, default=str)
 
     # Persist summary
     summary_path = os.path.join(runs_dir, "summary.json")
@@ -986,7 +986,7 @@ def main() -> int:
         ],
     }
     with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary_data, f, indent=2)
+        json.dump(summary_data, f, indent=2, default=str)
 
     # Update runs index
     index_path = os.path.join(os.path.dirname(__file__), "runs", "index.json")
@@ -1008,7 +1008,7 @@ def main() -> int:
         "model": asst_config.get("model"),
     })
     with open(index_path, "w", encoding="utf-8") as f:
-        json.dump(index_data, f, indent=2)
+        json.dump(index_data, f, indent=2, default=str)
 
     print("\n==================================================================")
     print("                    EVALUATION RUN COMPLETE")
