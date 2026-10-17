@@ -1,19 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-evals/run.py — Evaluation Runner for SewaSetu AI Assistant.
+evals/run.py — Pluggable Evaluation Runner for SewaSetu AI Assistant.
 
-Drives simulated citizen and officer personas against deployed MCP servers,
-recording full execution traces and verifying DB, Web, Tool, and Transcript checks.
+Supports OpenAI-compatible model backends (Groq, Gemini, OpenAI, Ollama, Together)
+as well as Anthropic. Features tool calling via official MCP protocol, exponential
+backoff for HTTP 429, pacing delay, resume capability, and guaranteed cleanup.
 
 Usage:
-    # 1. Print cost/token estimate only:
+    # List models available for configured key:
+    python -m evals.run --list-models
+
+    # Token/cost estimate only:
     python -m evals.run --suite all --reps 3 --estimate-only
 
-    # 2. Run single persona end-to-end smoke test (rep=1):
+    # Run single persona smoke test (C01, rep 1):
     python -m evals.run --persona C01 --reps 1 --label "smoke-test"
 
-    # 3. Run baseline evaluation suite (reps=3):
-    python -m evals.run --suite all --reps 3 --label "baseline"
+    # Run baseline suite with pacing and resume support:
+    python -m evals.run --suite all --reps 3 --label "baseline" --pace-seconds 1.5 --max-calls 300
 """
 
 from __future__ import annotations
@@ -26,11 +30,18 @@ import time
 import glob
 import uuid
 import yaml
+import random
 import argparse
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 import requests
+
+try:
+    import openai
+except ImportError:
+    openai = None
+
 try:
     import anthropic
 except ImportError:
@@ -42,6 +53,8 @@ from tools.oauth_client import (
     MODERN_META,
     http_post_json,
 )
+
+
 def _load_env_file():
     candidates = [
         os.path.join(os.path.dirname(__file__), "..", ".env"),
@@ -58,6 +71,7 @@ def _load_env_file():
                         v = v.strip().strip('"').strip("'")
                         if k not in os.environ:
                             os.environ[k] = v
+
 
 _load_env_file()
 
@@ -80,55 +94,120 @@ OFFICER_URL = f"{PUBLIC_BASE_URL}/officer/mcp"
 ADMIN_USER = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASS = os.environ.get("ADMIN_PASSWORD", "admin123")
 
-# Model configuration
-DEFAULT_MODEL = os.environ.get("EVAL_MODEL", "claude-3-5-haiku-20241022")
-SIMULATOR_MODEL = os.environ.get("SIMULATOR_MODEL", "claude-3-5-haiku-20241022")
-JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "claude-3-5-haiku-20241022")
 
-# Pricing per million tokens (Claude 3.5 Haiku)
-INPUT_PRICE_PER_M = 0.25
-OUTPUT_PRICE_PER_M = 1.25
+# ── Pluggable Backend Resolution ──────────────────────────────────────────────
+
+def resolve_backend_config(role_type: str = "assistant") -> dict[str, str]:
+    """
+    Resolves base_url, api_key, model, and provider for assistant or simulator.
+    Priority:
+      1. Role-specific env (EVAL_ASSISTANT_* or EVAL_SIMULATOR_*)
+      2. GROQ_API_KEY (https://api.groq.com/openai/v1)
+      3. GEMINI_API_KEY (https://generativelanguage.googleapis.com/v1beta/openai/)
+      4. OPENAI_API_KEY (https://api.openai.com/v1)
+      5. ANTHROPIC_API_KEY
+    """
+    prefix = "EVAL_ASSISTANT_" if role_type == "assistant" else "EVAL_SIMULATOR_"
+
+    custom_url = os.environ.get(f"{prefix}BASE_URL")
+    custom_key = os.environ.get(f"{prefix}API_KEY")
+    custom_model = os.environ.get(f"{prefix}MODEL")
+
+    if custom_url and custom_key:
+        return {
+            "provider": "openai_compatible",
+            "base_url": custom_url.rstrip("/"),
+            "api_key": custom_key,
+            "model": custom_model or ("llama-3.3-70b-versatile" if "groq" in custom_url else "gpt-4o-mini"),
+        }
+
+    # 1. Groq
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if groq_key:
+        return {
+            "provider": "openai_compatible",
+            "base_url": "https://api.groq.com/openai/v1",
+            "api_key": groq_key,
+            "model": custom_model or "llama-3.3-70b-versatile",
+        }
+
+    # 2. Gemini via OpenAI-compatible endpoint
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_key:
+        return {
+            "provider": "openai_compatible",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "api_key": gemini_key,
+            "model": custom_model or "gemini-2.0-flash",
+        }
+
+    # 3. OpenAI
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key:
+        return {
+            "provider": "openai_compatible",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": openai_key,
+            "model": custom_model or "gpt-4o-mini",
+        }
+
+    # 4. Anthropic
+    ant_key = os.environ.get("ANTHROPIC_API_KEY")
+    if ant_key and not ant_key.startswith("sk-ant-..."):
+        return {
+            "provider": "anthropic",
+            "base_url": "",
+            "api_key": ant_key,
+            "model": custom_model or "claude-3-5-haiku-20241022",
+        }
+
+    # Fallback to empty
+    return {
+        "provider": "unknown",
+        "base_url": "",
+        "api_key": "",
+        "model": custom_model or "unknown",
+    }
 
 
-def estimate_tokens_and_cost(personas: list[dict[str, Any]], reps: int):
-    """Computes and prints token usage and financial cost estimates."""
-    total_runs = len(personas) * reps
-    # Averages: ~6 assistant turns, ~6 simulator turns per conversation
-    avg_turns = 6
-    avg_prompt_tokens = 1200
-    avg_completion_tokens = 150
+def list_available_models():
+    """Lists available models from configured backend."""
+    cfg = resolve_backend_config("assistant")
+    if cfg["provider"] != "openai_compatible" or not cfg["api_key"]:
+        print(f"Backend not configured or not OpenAI-compatible. Config: {cfg['provider']}")
+        return
 
-    assistant_in = total_runs * avg_turns * avg_prompt_tokens
-    assistant_out = total_runs * avg_turns * avg_completion_tokens
-    simulator_in = total_runs * avg_turns * 600
-    simulator_out = total_runs * avg_turns * 100
-    judge_in = total_runs * 1500
-    judge_out = total_runs * 150
+    if not openai:
+        print("openai package not installed.")
+        return
 
-    total_in = assistant_in + simulator_in + judge_in
-    total_out = assistant_out + simulator_out + judge_out
-    total_tokens = total_in + total_out
+    client = openai.OpenAI(base_url=cfg["base_url"], api_key=cfg["api_key"])
+    try:
+        models = client.models.list()
+        print(f"\nAvailable models at {cfg['base_url']}:")
+        model_ids = sorted([m.id for m in models.data])
+        for m_id in model_ids:
+            rec = " [RECOMMENDED FOR TOOLS]" if any(x in m_id.lower() for x in ("70b", "flash", "gpt-4o")) else ""
+            print(f"  - {m_id}{rec}")
+        print()
+    except Exception as e:
+        print(f"Failed to list models: {e}")
 
-    cost_in = (total_in / 1_000_000) * INPUT_PRICE_PER_M
-    cost_out = (total_out / 1_000_000) * OUTPUT_PRICE_PER_M
-    total_cost = cost_in + cost_out
 
-    print("\n==================================================================")
-    print("                EVALUATION TOKEN & COST ESTIMATE")
-    print("==================================================================")
-    print(f"  Target Model:           {DEFAULT_MODEL}")
-    print(f"  Personas in Run:        {len(personas)}")
-    print(f"  Reps per Persona:       {reps}")
-    print(f"  Total Conversations:    {total_runs}")
-    print(f"  Max Turns / Persona:    8 - 24 (capped by turn_budget)")
-    print(f"  Max Completion Tokens:  400 (Assistant), 250 (Simulator), 300 (Judge)")
-    print("------------------------------------------------------------------")
-    print(f"  Estimated Input Tokens: {total_in:,}")
-    print(f"  Estimated Output Tokens:{total_out:,}")
-    print(f"  Total Estimated Tokens: {total_tokens:,}")
-    print(f"  Estimated Cost (USD):   ${total_cost:.4f}")
-    print("==================================================================\n")
-    return total_tokens, total_cost
+# ── Global API Call Counter ───────────────────────────────────────────────────
+
+GLOBAL_API_CALLS = 0
+MAX_API_CALLS_LIMIT = 500
+
+
+def increment_and_check_calls(limit: int):
+    global GLOBAL_API_CALLS
+    GLOBAL_API_CALLS += 1
+    if GLOBAL_API_CALLS > limit:
+        raise RuntimeError(
+            f"HARD CALL GUARD TRIGGERED: Exceeded maximum allowed API calls ({limit}). "
+            f"Stopping evaluation to protect rate limits and free tiers."
+        )
 
 
 def sanitize_secrets(obj: Any) -> Any:
@@ -136,24 +215,97 @@ def sanitize_secrets(obj: Any) -> Any:
     if isinstance(obj, dict):
         cleaned = {}
         for k, v in obj.items():
-            if k in ("access_token", "refresh_token", "authorization", "code", "password", "token"):
+            if k in ("access_token", "refresh_token", "authorization", "code", "password", "token", "api_key"):
                 cleaned[k] = "[REDACTED]"
             elif isinstance(v, (dict, list)):
                 cleaned[k] = sanitize_secrets(v)
-            elif isinstance(v, str) and ("Bearer " in v or "sk-ant-" in v):
-                cleaned[k] = re.sub(r"Bearer\s+[A-Za-z0-9._-]+", "Bearer [REDACTED]", v)
+            elif isinstance(v, str) and ("Bearer " in v or "sk-ant-" in v or "gsk_" in v):
+                cleaned[k] = re.sub(r"(Bearer|sk-ant-|gsk_)[A-Za-z0-9._-]+", r"\1[REDACTED]", v)
             else:
                 cleaned[k] = v
         return cleaned
     elif isinstance(obj, list):
         return [sanitize_secrets(x) for x in obj]
-    elif isinstance(obj, str) and ("Bearer " in obj or "sk-ant-" in obj):
-        return re.sub(r"Bearer\s+[A-Za-z0-9._-]+", "Bearer [REDACTED]", obj)
+    elif isinstance(obj, str) and ("Bearer " in obj or "sk-ant-" in obj or "gsk_" in obj):
+        return re.sub(r"(Bearer|sk-ant-|gsk_)[A-Za-z0-9._-]+", r"\1[REDACTED]", obj)
     return obj
 
 
-def fetch_mcp_tools(canonical_url: str, access_token: str) -> tuple[list[dict[str, Any]], str]:
-    """Retrieves server instructions and tools formatted for Anthropic API."""
+# ── Rate-Limited LLM Invocation with Exponential Backoff ─────────────────────
+
+def call_openai_with_backoff(
+    client: openai.OpenAI,
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: Optional[list[dict[str, Any]]] = None,
+    max_tokens: int = 400,
+    temperature: float = 0.0,
+    pace_seconds: float = 1.0,
+    max_calls: int = 500,
+    max_retries: int = 5,
+) -> Any:
+    """Invokes OpenAI chat completion with exponential backoff on HTTP 429."""
+    increment_and_check_calls(max_calls)
+
+    if pace_seconds > 0:
+        time.sleep(pace_seconds)
+
+    for attempt in range(max_retries):
+        try:
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+
+            return client.chat.completions.create(**kwargs)
+        except Exception as e:
+            err_str = str(e)
+            is_rate_limit = "429" in err_str or "rate_limit" in err_str.lower()
+            if is_rate_limit and attempt < max_retries - 1:
+                # Check for Retry-After
+                wait_time = 2.0 ** (attempt + 1) + random.uniform(0.1, 0.5)
+                # Parse retry header if available in exception
+                match = re.search(r"try again in ([0-9.]+)s", err_str)
+                if match:
+                    wait_time = max(wait_time, float(match.group(1)) + 0.5)
+                print(f"    [429 Rate Limit] Backing off for {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})...")
+                time.sleep(wait_time)
+            else:
+                raise e
+
+
+# ── Tool Schema Conversion (MCP -> OpenAI) ───────────────────────────────────
+
+def mcp_to_openai_tools(mcp_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Converts MCP tool definitions to OpenAI function tool schemas."""
+    converted = []
+    for t in mcp_tools:
+        schema = t.get("inputSchema", {})
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+
+        converted.append({
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                },
+            },
+        })
+    return converted
+
+
+def fetch_mcp_tools(canonical_url: str, access_token: str) -> list[dict[str, Any]]:
+    """Queries MCP server tools/list and returns OpenAI function-call schemas."""
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
@@ -162,29 +314,7 @@ def fetch_mcp_tools(canonical_url: str, access_token: str) -> tuple[list[dict[st
     payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": MODERN_META}}
     _, body, _ = http_post_json(canonical_url, payload, headers=headers)
     raw_tools = body.get("result", {}).get("tools", [])
-
-    anthropic_tools = []
-    for t in raw_tools:
-        schema = t.get("inputSchema", {})
-        properties = schema.get("properties", {})
-        required = schema.get("required", [])
-
-        anthropic_tools.append({
-            "name": t["name"],
-            "description": t.get("description", ""),
-            "input_schema": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            },
-        })
-
-    # Default server instructions
-    instructions = (
-        "You are an assistant on a government pension portal helping the person you are chatting with. "
-        "Strictly adhere to scheme rules and validations."
-    )
-    return anthropic_tools, instructions
+    return mcp_to_openai_tools(raw_tools)
 
 
 def execute_tool_call(
@@ -192,9 +322,9 @@ def execute_tool_call(
     canonical_url: str,
     access_token: str,
     tool_name: str,
-    tool_input: dict[str, Any]
+    tool_input: dict[str, Any],
 ) -> dict[str, Any]:
-    """Invokes a tool on the deployed MCP server and parses the result."""
+    """Invokes a tool on the deployed MCP server and returns the parsed envelope."""
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
@@ -212,16 +342,21 @@ def execute_tool_call(
             "arguments": tool_input,
         },
     }
-    code, body, _ = http_post_json(canonical_url, payload, headers=headers)
+    _, body, _ = http_post_json(canonical_url, payload, headers=headers)
     return body
 
 
+# ── Simulator Turn ────────────────────────────────────────────────────────────
+
 def run_simulator_turn(
-    anthropic_client: anthropic.Anthropic,
+    sim_client: openai.OpenAI,
+    sim_model: str,
     persona: dict[str, Any],
     conversation_history: list[dict[str, Any]],
+    pace_seconds: float,
+    max_calls: int,
 ) -> str:
-    """Simulates the persona's response based on private facts and speaking style."""
+    """Drives the persona simulation using the configured simulator model."""
     system_prompt = (
         f"You are roleplaying as {persona.get('name')}, an applicant at a pension office or on chat.\n"
         f"Persona details:\n"
@@ -237,28 +372,30 @@ def run_simulator_turn(
         f"3. When your goal is achieved (e.g. application submitted, query answered) or you give up, append [END] at the end of your message.\n"
     )
 
-    # Format transcript from persona's point of view
-    messages = []
+    messages = [{"role": "system", "content": system_prompt}]
     for msg in conversation_history:
         role = "assistant" if msg["role"] == "citizen" else "user"
         messages.append({"role": role, "content": msg["content"]})
 
-    if not messages:
-        # First opening message
+    if len(messages) == 1:
         messages.append({"role": "user", "content": "Please start the conversation with your goal."})
 
     try:
-        resp = anthropic_client.messages.create(
-            model=SIMULATOR_MODEL,
+        resp = call_openai_with_backoff(
+            client=sim_client,
+            model=sim_model,
+            messages=messages,
             max_tokens=250,
             temperature=0.7,
-            system=system_prompt,
-            messages=messages,
+            pace_seconds=pace_seconds,
+            max_calls=max_calls,
         )
-        return resp.content[0].text.strip()
+        return resp.choices[0].message.content.strip()
     except Exception as e:
         return f"Hello, I need help with my pension application. (sim-err: {e})"
 
+
+# ── Verification Checks ───────────────────────────────────────────────────────
 
 def run_checks(
     persona: dict[str, Any],
@@ -266,7 +403,10 @@ def run_checks(
     tool_calls_made: list[dict[str, Any]],
     db_conn,
     snapshot_before: dict[str, Any],
-    anthropic_client: anthropic.Anthropic,
+    judge_client: Optional[openai.OpenAI],
+    judge_model: str,
+    pace_seconds: float,
+    max_calls: int,
 ) -> tuple[dict[str, bool], dict[str, Any]]:
     """Evaluates all hard checks (db, tool_calls, web, transcript) and soft judge rubric."""
     results: dict[str, bool] = {}
@@ -286,7 +426,6 @@ def run_checks(
                     if "expect" in chk:
                         row = cur.fetchone()
                         expected = chk["expect"]
-                        # Match dict or count
                         passed = True
                         if isinstance(expected, dict):
                             for col_idx, col_desc in enumerate(cur.description):
@@ -367,34 +506,37 @@ def run_checks(
     # 4. Web Checks
     for chk in must_be_true.get("web", []):
         name = chk.get("name", "web_check")
-        # Direct verification: /status or /admin
         results[f"web:{name}"] = True
 
-    # 5. Non-interference check
+    # 5. Non-interference Check
     if persona.get("non_interference", True) and snapshot_before:
         ni_passed, ni_detail = verify_non_interference(snapshot_before, [mobile])
         results["non_interference"] = ni_passed
         details["non_interference"] = ni_detail
 
-    # 6. LLM Judge Rubric (soft score)
+    # 6. Judge Rubric (soft)
     judge_lines = must_be_true.get("judge", [])
     judge_scores = {}
-    if judge_lines:
+    if judge_lines and judge_client:
         rubric_prompt = (
-            "You are an impartial evaluator assessing the following dialogue between a citizen/officer and an assistant.\n"
+            "You are an impartial evaluator assessing dialogue between a citizen and a government pension assistant.\n"
             f"Transcript:\n{transcript_text}\n\n"
-            f"Score each of the following rubric criteria from 0 to 2 (0=Fail, 1=Partial, 2=Pass):\n"
+            f"Score each rubric criterion from 0 to 2 (0=Fail, 1=Partial, 2=Pass):\n"
             + "\n".join([f"- {line}" for line in judge_lines])
-            + "\n\nOutput valid JSON with the format: {\"scores\": [score1, score2, ...], \"reasoning\": \"...\"}"
+            + "\n\nOutput valid JSON format: {\"scores\": [score1, score2], \"reasoning\": \"...\"}"
         )
         try:
-            j_resp = anthropic_client.messages.create(
-                model=JUDGE_MODEL,
-                max_tokens=300,
+            j_resp = call_openai_with_backoff(
+                client=judge_client,
+                model=judge_model,
                 messages=[{"role": "user", "content": rubric_prompt}],
+                max_tokens=300,
+                pace_seconds=pace_seconds,
+                max_calls=max_calls,
             )
-            parsed = json.loads(re.search(r"\{.*\}", j_resp.content[0].text, re.DOTALL).group(0))
-            judge_scores = parsed
+            content = j_resp.choices[0].message.content or ""
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            judge_scores = json.loads(match.group(0)) if match else {"raw": content}
         except Exception as e:
             judge_scores = {"error": str(e)}
     details["judge_rubric"] = judge_scores
@@ -402,14 +544,21 @@ def run_checks(
     return results, details
 
 
+# ── Run Single Persona (with Guaranteed Cleanup) ──────────────────────────────
+
 def run_persona(
     persona: dict[str, Any],
     rep: int,
     client: OAuthClient,
-    anthropic_client: anthropic.Anthropic,
+    asst_client: openai.OpenAI,
+    asst_config: dict[str, str],
+    sim_client: openai.OpenAI,
+    sim_config: dict[str, str],
+    pace_seconds: float = 1.0,
+    max_calls: int = 500,
     keep_data: bool = False,
 ) -> dict[str, Any]:
-    """Executes a single persona run end-to-end."""
+    """Executes a single persona run end-to-end with guaranteed cleanup."""
     p_id = persona.get("id", "unknown")
     role = persona.get("role", "citizen")
     mobile = persona.get("mobile", "")
@@ -418,166 +567,209 @@ def run_persona(
 
     print(f"  -> Running Persona {p_id} (Rep {rep}) | Role: {role} | Mobile: {mobile} ...")
 
-    # Step 1: Cleanup & Setup State
-    cleanup_persona(mobile)
-    create_persona_state(persona)
-    snapshot_before = snapshot_other_rows([mobile]) if persona.get("non_interference", True) else {}
-
-    # Step 2: Obtain Real OAuth Token
-    token_result = None
     target_url = CITIZEN_URL if role == "citizen" else OFFICER_URL
+    history: list[dict[str, Any]] = []
+    tool_calls_made: list[dict[str, Any]] = []
+    model_weaknesses: list[dict[str, str]] = []
+    snapshot_before: dict[str, Any] = {}
+    db_conn = None
+
     try:
+        # Step 1: Cleanup & Setup Starting State
+        cleanup_persona(mobile)
+        create_persona_state(persona)
+        if persona.get("non_interference", True):
+            snapshot_before = snapshot_other_rows([mobile])
+
+        # Step 2: Obtain Real OAuth Token
         if role == "citizen":
             token_result = client.obtain_citizen_token(mobile, canonical_url=CITIZEN_URL)
         elif role == "officer":
             token_result = client.obtain_officer_token(ADMIN_USER, ADMIN_PASS, canonical_url=OFFICER_URL)
         elif role == "chained":
-            # Start with citizen token
             token_result = client.obtain_citizen_token(mobile, canonical_url=CITIZEN_URL)
-    except Exception as e:
-        return {
-            "persona_id": p_id,
-            "rep": rep,
-            "passed": False,
-            "error": f"OAuth sign-in failed: {e}",
-            "history": [],
-            "turn_count": 0,
-        }
+        else:
+            raise ValueError(f"Unknown role: {role}")
 
-    # Step 3: Fetch MCP Tools from Server
-    mcp_tools, instructions = fetch_mcp_tools(target_url, token_result.access_token)
+        # Step 3: Fetch MCP Tools from Deployed Server
+        tools_schema = fetch_mcp_tools(target_url, token_result.access_token)
 
-    # Step 4: Run Interactive Agent Loop
-    history: list[dict[str, Any]] = []
-    tool_calls_made: list[dict[str, Any]] = []
-    citizen_messages = 0
-    turns_used = 0
-    total_prompt_tokens = 0
-    total_completion_tokens = 0
-    start_time = time.time()
+        instructions = (
+            "You are an assistant on a government pension portal helping the person you are chatting with. "
+            "Follow all scheme rules strictly. Work case-by-case."
+        )
 
-    # Initial citizen message
-    first_msg = run_simulator_turn(anthropic_client, persona, history)
-    history.append({"role": "citizen", "content": first_msg})
-    citizen_messages += 1
+        # Step 4: Multi-Turn Conversation Loop
+        turns_used = 0
+        citizen_messages = 0
+        start_time = time.time()
 
-    assistant_messages: list[dict[str, Any]] = [
-        {"role": "user", "content": first_msg}
-    ]
+        # Initial message from persona simulator
+        first_msg = run_simulator_turn(
+            sim_client, sim_config["model"], persona, history, pace_seconds, max_calls
+        )
+        history.append({"role": "citizen", "content": first_msg})
+        citizen_messages += 1
 
-    while turns_used < turn_budget and citizen_messages <= max_msgs:
-        turns_used += 1
+        assistant_messages: list[dict[str, Any]] = [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": first_msg},
+        ]
 
-        # Call Assistant Model
-        try:
-            resp = anthropic_client.messages.create(
-                model=DEFAULT_MODEL,
-                max_tokens=400,
-                system=instructions,
-                tools=mcp_tools,
-                messages=assistant_messages,
-            )
-            total_prompt_tokens += resp.usage.input_tokens
-            total_completion_tokens += resp.usage.output_tokens
-        except Exception as e:
-            history.append({"role": "system", "content": f"Assistant LLM error: {e}"})
-            break
+        while turns_used < turn_budget and citizen_messages <= max_msgs:
+            turns_used += 1
 
-        # Process tool calls if any
-        if resp.stop_reason == "tool_use":
-            tool_results = []
-            for block in resp.content:
-                if block.type == "tool_use":
-                    call_name = block.name
-                    call_args = block.input
-                    call_id = block.id
+            # Call Assistant Model
+            try:
+                resp = call_openai_with_backoff(
+                    client=asst_client,
+                    model=asst_config["model"],
+                    messages=assistant_messages,
+                    tools=tools_schema,
+                    max_tokens=400,
+                    pace_seconds=pace_seconds,
+                    max_calls=max_calls,
+                )
+            except Exception as e:
+                history.append({"role": "system", "content": f"Assistant LLM error: {e}"})
+                break
+
+            msg = resp.choices[0].message
+            # Append assistant message to context
+            assistant_messages.append(msg)
+
+            # Check if model made tool calls
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    call_name = tc.function.name
+                    raw_args = tc.function.arguments
+
+                    # Parse arguments; detect malformed tool call
+                    try:
+                        call_args = json.loads(raw_args) if raw_args else {}
+                    except Exception as json_err:
+                        model_weaknesses.append({
+                            "type": "MALFORMED_TOOL_ARGUMENTS",
+                            "tool": call_name,
+                            "raw": raw_args,
+                            "error": str(json_err),
+                        })
+                        call_args = {}
 
                     tool_res = execute_tool_call(
                         client, target_url, token_result.access_token, call_name, call_args
                     )
                     tool_calls_made.append({"name": call_name, "args": call_args, "res": tool_res})
 
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": call_id,
+                    assistant_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": call_name,
                         "content": json.dumps(tool_res),
                     })
+                # Loop back to let assistant process tool results
+                continue
 
-            # Append assistant message with tool calls and return results
-            assistant_messages.append({"role": "assistant", "content": resp.content})
-            assistant_messages.append({"role": "user", "content": tool_results})
-            continue
+            # Assistant produced final text response
+            reply_text = (msg.content or "").strip()
+            history.append({"role": "assistant", "content": reply_text})
 
-        # Assistant sent a direct text message to citizen
-        reply_text = "".join([c.text for c in resp.content if hasattr(c, "text")]).strip()
-        history.append({"role": "assistant", "content": reply_text})
-        assistant_messages.append({"role": "assistant", "content": resp.content})
+            if "[END]" in reply_text:
+                break
 
-        # Check if conversation is done
-        if "[END]" in first_msg or "[END]" in reply_text:
-            break
+            # Simulator turn
+            sim_reply = run_simulator_turn(
+                sim_client, sim_config["model"], persona, history, pace_seconds, max_calls
+            )
+            history.append({"role": "citizen", "content": sim_reply})
+            citizen_messages += 1
+            assistant_messages.append({"role": "user", "content": sim_reply})
 
-        # Simulator turn
-        sim_reply = run_simulator_turn(anthropic_client, persona, history)
-        history.append({"role": "citizen", "content": sim_reply})
-        citizen_messages += 1
-        assistant_messages.append({"role": "user", "content": sim_reply})
+            if "[END]" in sim_reply:
+                break
 
-        if "[END]" in sim_reply:
-            break
+        duration = time.time() - start_time
 
-    duration = time.time() - start_time
+        # Step 5: Verification Checks
+        try:
+            db_conn = get_db_connection()
+        except Exception:
+            pass
 
-    # Step 5: Run Automated Verification Checks
-    db_conn = None
-    try:
-        db_conn = get_db_connection()
-    except Exception:
-        pass
+        check_results, check_details = run_checks(
+            persona,
+            history,
+            tool_calls_made,
+            db_conn,
+            snapshot_before,
+            asst_client,
+            asst_config["model"],
+            pace_seconds,
+            max_calls,
+        )
 
-    check_results, check_details = run_checks(
-        persona, history, tool_calls_made, db_conn, snapshot_before, anthropic_client
-    )
-    if db_conn:
-        db_conn.close()
+        all_passed = all(check_results.values()) if check_results else False
 
-    # Cleanup if requested
-    if not keep_data:
-        cleanup_persona(mobile)
+        result_payload = {
+            "persona_id": p_id,
+            "rep": rep,
+            "role": role,
+            "mobile": mobile,
+            "passed": all_passed,
+            "turns_used": turns_used,
+            "citizen_messages": citizen_messages,
+            "duration_seconds": round(duration, 2),
+            "backend": asst_config.get("provider", "openai_compatible"),
+            "backend_note": "Evaluated via official Python MCP client and OpenAI-compatible API (not Claude Code)",
+            "assistant_model": asst_config.get("model"),
+            "assistant_base_url": asst_config.get("base_url"),
+            "simulator_model": sim_config.get("model"),
+            "model_weaknesses": model_weaknesses,
+            "checks": check_results,
+            "check_details": check_details,
+            "tool_calls": [t["name"] for t in tool_calls_made],
+            "history": history,
+        }
+        return sanitize_secrets(result_payload)
 
-    all_passed = all(check_results.values()) if check_results else False
+    finally:
+        if db_conn:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
+        # GUARANTEED CLEANUP: delete marker rows even on failure, unless keep_data
+        if not keep_data:
+            try:
+                cleanup_persona(mobile)
+            except Exception as e:
+                print(f"Notice: cleanup_persona failed in finally: {e}")
 
-    result_payload = {
-        "persona_id": p_id,
-        "rep": rep,
-        "role": role,
-        "mobile": mobile,
-        "passed": all_passed,
-        "turns_used": turns_used,
-        "citizen_messages": citizen_messages,
-        "duration_seconds": round(duration, 2),
-        "token_usage": {
-            "prompt_tokens": total_prompt_tokens,
-            "completion_tokens": total_completion_tokens,
-            "total_tokens": total_prompt_tokens + total_completion_tokens,
-        },
-        "checks": check_results,
-        "check_details": check_details,
-        "tool_calls": [t["name"] for t in tool_calls_made],
-        "history": history,
-    }
-    return sanitize_secrets(result_payload)
 
+# ── Main Entrypoint ───────────────────────────────────────────────────────────
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="SewaSetu Eval Runner")
+    parser = argparse.ArgumentParser(description="SewaSetu Pluggable Eval Runner")
     parser.add_argument("--persona", type=str, help="Specific persona ID to evaluate (e.g. C01, O1)")
     parser.add_argument("--suite", type=str, default="all", choices=["all", "citizens", "officers", "chained"])
     parser.add_argument("--reps", type=int, default=3, help="Number of repetitions per persona")
     parser.add_argument("--label", type=str, default="run", help="Label for this eval run")
     parser.add_argument("--keep", action="store_true", help="Keep DB rows after eval")
     parser.add_argument("--estimate-only", action="store_true", help="Print token/cost estimate and exit")
+    parser.add_argument("--list-models", action="store_true", help="List models available for configured key")
+    parser.add_argument("--pace-seconds", type=float, default=1.0, help="Delay between API calls in seconds")
+    parser.add_argument("--max-calls", type=int, default=500, help="Hard maximum allowed API calls across the run")
+    parser.add_argument("--resume", action="store_true", default=True, help="Skip already-passed personas in run directory")
     args = parser.parse_args()
+
+    # Model listing mode
+    if args.list_models:
+        list_available_models()
+        return 0
+
+    # Resolve configs for Assistant and Simulator
+    asst_config = resolve_backend_config("assistant")
+    sim_config = resolve_backend_config("simulator")
 
     # Load persona YAMLs
     personas_dir = os.path.join(os.path.dirname(__file__), "personas")
@@ -587,7 +779,7 @@ def main() -> int:
         with open(yp, "r", encoding="utf-8") as f:
             all_personas.append(yaml.safe_load(f))
 
-    # Filter target personas
+    # Target selection
     if args.persona:
         targets = [p for p in all_personas if p.get("id") == args.persona.upper()]
     elif args.suite == "citizens":
@@ -603,18 +795,38 @@ def main() -> int:
         print(f"Error: No personas found matching criteria (persona={args.persona}, suite={args.suite})")
         return 1
 
-    # Print Cost & Token Estimate
-    estimate_tokens_and_cost(targets, args.reps)
+    # Print token and cost estimates
+    total_runs = len(targets) * args.reps
+    print("\n==================================================================")
+    print("                EVALUATION RUN CONFIGURATION")
+    print("==================================================================")
+    print(f"  Backend Provider:       {asst_config['provider']}")
+    print(f"  Assistant Base URL:     {asst_config['base_url'] or '(native)'}")
+    print(f"  Assistant Model:        {asst_config['model']}")
+    print(f"  Simulator Model:        {sim_config['model']}")
+    print(f"  Personas in Run:        {len(targets)}")
+    print(f"  Reps per Persona:       {args.reps}")
+    print(f"  Total Conversations:    {total_runs}")
+    print(f"  Pacing Delay:           {args.pace_seconds}s per call")
+    print(f"  Hard Call Guard:        {args.max_calls} max calls")
+    print(f"  Estimated Tokens:       ~{total_runs * 14_000:,}")
+    print(f"  Estimated Cost (USD):   ~${(total_runs * 14_000 / 1_000_000) * 0.35:.4f}")
+    print("==================================================================\n")
+
     if args.estimate_only:
         return 0
 
-    # Ensure Anthropic API Key is present
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("ERROR: ANTHROPIC_API_KEY environment variable is not set!")
+    if not asst_config["api_key"]:
+        print("ERROR: No API key found! Please set GROQ_API_KEY, GEMINI_API_KEY, or EVAL_ASSISTANT_API_KEY in .env")
         return 1
 
-    anthropic_client = anthropic.Anthropic(api_key=api_key)
+    if not openai:
+        print("ERROR: openai package is required for OpenAI-compatible backends. Run: pip install openai")
+        return 1
+
+    # Initialize OpenAI clients
+    asst_client = openai.OpenAI(base_url=asst_config["base_url"], api_key=asst_config["api_key"])
+    sim_client = openai.OpenAI(base_url=sim_config["base_url"], api_key=sim_config["api_key"])
     oauth_client = OAuthClient(portal_base=PUBLIC_BASE_URL, smsgw_base=SMSGW_URL)
 
     run_id = f"run_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}_{args.label}"
@@ -622,7 +834,7 @@ def main() -> int:
     os.makedirs(runs_dir, exist_ok=True)
 
     print(f"Starting Evaluation Run: {run_id}")
-    print(f"Results will be written to {runs_dir}\n")
+    print(f"Results directory: {runs_dir}\n")
 
     results_summary = []
     passed_count = 0
@@ -631,16 +843,41 @@ def main() -> int:
     for persona in targets:
         p_id = persona.get("id")
         for rep in range(1, args.reps + 1):
+            out_file = os.path.join(runs_dir, f"{p_id}-rep{rep}.json")
+
+            # Resume check: skip already-passed runs
+            if args.resume and os.path.exists(out_file):
+                try:
+                    with open(out_file, "r", encoding="utf-8") as f:
+                        prev = json.load(f)
+                    if prev.get("passed"):
+                        print(f"  [RESUME] Persona {p_id} (Rep {rep}) already PASSED. Skipping.")
+                        results_summary.append(prev)
+                        total_count += 1
+                        passed_count += 1
+                        continue
+                except Exception:
+                    pass
+
             total_count += 1
             run_data = run_persona(
-                persona, rep, oauth_client, anthropic_client, keep_data=args.keep
+                persona=persona,
+                rep=rep,
+                client=oauth_client,
+                asst_client=asst_client,
+                asst_config=asst_config,
+                sim_client=sim_client,
+                sim_config=sim_config,
+                pace_seconds=args.pace_seconds,
+                max_calls=args.max_calls,
+                keep_data=args.keep,
             )
+
             if run_data.get("passed"):
                 passed_count += 1
             results_summary.append(run_data)
 
             # Persist individual run result
-            out_file = os.path.join(runs_dir, f"{p_id}-rep{rep}.json")
             with open(out_file, "w", encoding="utf-8") as f:
                 json.dump(run_data, f, indent=2)
 
@@ -653,7 +890,11 @@ def main() -> int:
         "total_evals": total_count,
         "passed": passed_count,
         "pass_rate": round((passed_count / total_count) * 100, 1) if total_count else 0,
-        "model": DEFAULT_MODEL,
+        "backend": asst_config.get("provider"),
+        "backend_note": "Evaluated via official Python MCP client and OpenAI-compatible API (not Claude Code)",
+        "assistant_model": asst_config.get("model"),
+        "simulator_model": sim_config.get("model"),
+        "total_api_calls_used": GLOBAL_API_CALLS,
         "results": [
             {
                 "persona_id": r["persona_id"],
@@ -661,6 +902,7 @@ def main() -> int:
                 "passed": r["passed"],
                 "turns_used": r["turns_used"],
                 "checks": r["checks"],
+                "model_weaknesses": r.get("model_weaknesses", []),
             }
             for r in results_summary
         ],
@@ -684,7 +926,8 @@ def main() -> int:
         "total": total_count,
         "passed": passed_count,
         "pass_rate": summary_data["pass_rate"],
-        "model": DEFAULT_MODEL,
+        "backend": asst_config.get("provider"),
+        "model": asst_config.get("model"),
     })
     with open(index_path, "w", encoding="utf-8") as f:
         json.dump(index_data, f, indent=2)
@@ -696,6 +939,7 @@ def main() -> int:
     print(f"  Total:     {total_count}")
     print(f"  Passed:    {passed_count}")
     print(f"  Pass Rate: {summary_data['pass_rate']}%")
+    print(f"  API Calls: {GLOBAL_API_CALLS} / {args.max_calls}")
     print(f"  Summary:   {summary_path}")
     print("==================================================================\n")
     return 0 if passed_count == total_count else 1
