@@ -844,6 +844,7 @@ def main() -> int:
     parser.add_argument("--pace-seconds", type=float, default=1.0, help="Delay between API calls in seconds")
     parser.add_argument("--max-calls", type=int, default=500, help="Hard maximum allowed API calls across the run")
     parser.add_argument("--resume", action="store_true", default=True, help="Skip already-passed personas in run directory")
+    parser.add_argument("--run-id", type=str, default=None, help="Specific existing run directory name to resume")
     args = parser.parse_args()
 
     # Model listing mode
@@ -913,7 +914,10 @@ def main() -> int:
     sim_client = openai.OpenAI(base_url=sim_config["base_url"], api_key=sim_config["api_key"], max_retries=0)
     oauth_client = OAuthClient(portal_base=PUBLIC_BASE_URL, smsgw_base=SMSGW_URL)
 
-    run_id = f"run_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}_{args.label}"
+    if args.run_id:
+        run_id = args.run_id
+    else:
+        run_id = f"run_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}_{args.label}"
     runs_dir = os.path.join(os.path.dirname(__file__), "runs", run_id)
     os.makedirs(runs_dir, exist_ok=True)
 
