@@ -51,8 +51,11 @@ from tools.oauth_client import (
     OAuthClient,
     MODERN_PROTOCOL_VERSION,
     MODERN_META,
+    parse_sse_or_json,
     http_post_json,
 )
+from citizen_mcp.server import CITIZEN_INSTRUCTIONS
+from officer_mcp.server import OFFICER_INSTRUCTIONS
 
 
 def _load_env_file():
@@ -306,15 +309,42 @@ def mcp_to_openai_tools(mcp_tools: list[dict[str, Any]]) -> list[dict[str, Any]]
     return converted
 
 
-def fetch_mcp_tools(canonical_url: str, access_token: str) -> list[dict[str, Any]]:
-    """Queries MCP server tools/list and returns OpenAI function-call schemas."""
+def post_mcp_request(
+    url: str,
+    payload: dict[str, Any],
+    access_token: str,
+    mcp_method: str,
+    mcp_name: str = "",
+) -> dict[str, Any]:
+    """Posts a JSON-RPC request to MCP Streamable HTTP endpoint and parses SSE/JSON."""
     headers = {
         "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
         "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
+        "Mcp-Method": mcp_method,
     }
-    payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": MODERN_META}}
-    _, body, _ = http_post_json(canonical_url, payload, headers=headers)
+    if mcp_name:
+        headers["Mcp-Name"] = mcp_name
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=25)
+        raw_text = resp.text
+    except Exception as e:
+        return {"error": {"code": -32000, "message": f"Network error calling MCP: {e}"}}
+
+    return parse_sse_or_json(raw_text, expected_id=payload.get("id"))
+
+
+def fetch_mcp_tools(canonical_url: str, access_token: str) -> list[dict[str, Any]]:
+    """Queries MCP server tools/list and returns OpenAI function-call schemas."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {"_meta": MODERN_META},
+    }
+    body = post_mcp_request(canonical_url, payload, access_token, mcp_method="tools/list")
     raw_tools = body.get("result", {}).get("tools", [])
     return mcp_to_openai_tools(raw_tools)
 
@@ -327,16 +357,10 @@ def execute_tool_call(
     tool_input: dict[str, Any],
 ) -> dict[str, Any]:
     """Invokes a tool on the deployed MCP server and returns the parsed envelope."""
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
-        "Mcp-Method": "tools/call",
-        "Mcp-Name": tool_name,
-    }
+    call_id = int(time.time() * 1000) % 100000
     payload = {
         "jsonrpc": "2.0",
-        "id": int(time.time() * 1000) % 100000,
+        "id": call_id,
         "method": "tools/call",
         "params": {
             "_meta": MODERN_META,
@@ -344,8 +368,7 @@ def execute_tool_call(
             "arguments": tool_input,
         },
     }
-    _, body, _ = http_post_json(canonical_url, payload, headers=headers)
-    return body
+    return post_mcp_request(canonical_url, payload, access_token, mcp_method="tools/call", mcp_name=tool_name)
 
 
 # ── Simulator Turn ────────────────────────────────────────────────────────────
@@ -359,25 +382,44 @@ def run_simulator_turn(
     max_calls: int,
 ) -> str:
     """Drives the persona simulation using the configured simulator model."""
-    system_prompt = (
-        f"You are roleplaying as {persona.get('name')}, an applicant at a pension office or on chat.\n"
-        f"Persona details:\n"
-        f"- Role: {persona.get('role')}\n"
-        f"- Age: {persona.get('age')}\n"
-        f"- Village: {persona.get('village')}, Block: {persona.get('block')}\n"
-        f"- Goal: {persona.get('goal')}\n"
-        f"- How you talk: {persona.get('how_they_talk')}\n"
-        f"- Private facts (REVEAL ONLY WHEN ASKED): {json.dumps(persona.get('private_facts', {}))}\n\n"
-        f"CRITICAL RULES:\n"
-        f"1. Stay completely in character. Never mention you are an AI, testing, or taking an evaluation.\n"
-        f"2. Reveal private facts (DOB, bank account, IFSC, documents) only when the assistant asks for them.\n"
-        f"3. When your goal is achieved (e.g. application submitted, query answered) or you give up, append [END] at the end of your message.\n"
-    )
+    role = persona.get("role", "citizen")
+    if role == "officer":
+        system_prompt = (
+            f"You are roleplaying as {persona.get('name')}, an officer reviewing pension applications.\n"
+            f"Goal: {persona.get('goal')}\n"
+            f"How you talk: {persona.get('how_they_talk')}\n"
+            f"Private facts / inputs: {json.dumps(persona.get('private_facts', {}))}\n\n"
+            f"CRITICAL RULES:\n"
+            f"1. Stay completely in character. Never mention you are an AI, testing, or taking an evaluation.\n"
+            f"2. Instruct the assistant according to your goal and private facts.\n"
+            f"3. When your goal is achieved (e.g. decision confirmed or review finished), append [END] at the end of your message.\n"
+        )
+    else:
+        system_prompt = (
+            f"You are roleplaying as {persona.get('name')}, an applicant at a pension office or on chat.\n"
+            f"Persona details:\n"
+            f"- Role: {persona.get('role')}\n"
+            f"- Age: {persona.get('age')}\n"
+            f"- Village: {persona.get('village')}, Block: {persona.get('block')}\n"
+            f"- Goal: {persona.get('goal')}\n"
+            f"- How you talk: {persona.get('how_they_talk')}\n"
+            f"- Private facts (REVEAL ONLY WHEN ASKED): {json.dumps(persona.get('private_facts', {}))}\n\n"
+            f"CRITICAL RULES:\n"
+            f"1. Stay completely in character. Never mention you are an AI, testing, or taking an evaluation.\n"
+            f"2. Reveal private facts (DOB, bank account, IFSC, documents) ONLY when the assistant asks for them.\n"
+            f"3. If the assistant asks for an age proof document or file URL, provide the doc_url from private facts.\n"
+            f"4. If the assistant presents preview or asks for confirmation to submit, answer clearly with 'Haan' or 'Yes' if details match.\n"
+            f"5. Emit [END] ONLY when:\n"
+            f"   - An application number is received or submission is confirmed, OR\n"
+            f"   - The assistant explicitly confirms your status question or withdrawal, OR\n"
+            f"   - The assistant explicitly states that you are ineligible or refuses your request.\n"
+            f"   Do NOT emit [END] on initial greetings, intermediate questions, or before your goal is finished!\n"
+        )
 
     messages = [{"role": "system", "content": system_prompt}]
     for msg in conversation_history:
-        role = "assistant" if msg["role"] == "citizen" else "user"
-        messages.append({"role": role, "content": msg["content"]})
+        role_tag = "assistant" if msg["role"] == "citizen" else "user"
+        messages.append({"role": role_tag, "content": msg["content"]})
 
     if len(messages) == 1:
         messages.append({"role": "user", "content": "Please start the conversation with your goal."})
@@ -596,10 +638,18 @@ def run_persona(
         # Step 3: Fetch MCP Tools from Deployed Server
         tools_schema = fetch_mcp_tools(target_url, token_result.access_token)
 
-        instructions = (
+        if role in ("citizen", "chained"):
+            server_instructions = CITIZEN_INSTRUCTIONS
+        elif role == "officer":
+            server_instructions = OFFICER_INSTRUCTIONS
+        else:
+            server_instructions = ""
+
+        neutral_line = (
             "You are an assistant on a government pension portal helping the person you are chatting with. "
             "Follow all scheme rules strictly. Work case-by-case."
         )
+        instructions = f"{server_instructions}\n\n{neutral_line}" if server_instructions else neutral_line
 
         # Step 4: Multi-Turn Conversation Loop
         turns_used = 0
@@ -637,11 +687,27 @@ def run_persona(
                 break
 
             msg = resp.choices[0].message
-            # Append assistant message to context
-            assistant_messages.append(msg)
 
             # Check if model made tool calls
             if msg.tool_calls:
+                asst_entry: dict[str, Any] = {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                }
+                if msg.content:
+                    asst_entry["content"] = msg.content
+                assistant_messages.append(asst_entry)
+
                 for tc in msg.tool_calls:
                     call_name = tc.function.name
                     raw_args = tc.function.arguments
@@ -663,11 +729,20 @@ def run_persona(
                     )
                     tool_calls_made.append({"name": call_name, "args": call_args, "res": tool_res})
 
+                    # Extract inner text if present for cleaner LLM context
+                    tool_content = ""
+                    if isinstance(tool_res, dict) and "result" in tool_res:
+                        content_items = tool_res["result"].get("content", [])
+                        if content_items and isinstance(content_items, list) and "text" in content_items[0]:
+                            tool_content = content_items[0]["text"]
+                    if not tool_content:
+                        tool_content = json.dumps(tool_res)
+
                     assistant_messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "name": call_name,
-                        "content": json.dumps(tool_res),
+                        "content": tool_content,
                     })
                 # Loop back to let assistant process tool results
                 continue
@@ -675,6 +750,7 @@ def run_persona(
             # Assistant produced final text response
             reply_text = (msg.content or "").strip()
             history.append({"role": "assistant", "content": reply_text})
+            assistant_messages.append({"role": "assistant", "content": reply_text})
 
             if "[END]" in reply_text:
                 break
