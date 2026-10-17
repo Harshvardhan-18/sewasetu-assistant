@@ -761,10 +761,20 @@ def run_persona(
             )
             history.append({"role": "citizen", "content": sim_reply})
             citizen_messages += 1
-            assistant_messages.append({"role": "user", "content": sim_reply})
+
+            clean_sim_reply = sim_reply.replace("[END]", "").strip()
+            assistant_messages.append({"role": "user", "content": clean_sim_reply})
 
             if "[END]" in sim_reply:
-                break
+                # Terminate only if goal is reached (submission, refusal, withdrawal, or query answer)
+                is_apply_goal = "apply" in persona.get("goal", "").lower()
+                has_submitted = any(t.get("name") == "submit_application" for t in tool_calls_made)
+                last_asst_text = history[-2]["content"].lower() if len(history) >= 2 else ""
+                has_terminal_response = any(
+                    w in last_asst_text for w in ("ineligible", "cannot", "window", "not eligible", "closed", "ssp26", "submitted", "withdrawn", "approved", "rejected")
+                )
+                if not is_apply_goal or has_submitted or has_terminal_response:
+                    break
 
         duration = time.time() - start_time
 

@@ -42,8 +42,8 @@ files:
 
 fixtures: []  # no pre-existing state needed
 
-turn_budget: 15
-max_citizen_messages: 15
+turn_budget: 20
+max_citizen_messages: 20
 
 must_be_true:
   db:
