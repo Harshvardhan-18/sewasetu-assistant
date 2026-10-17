@@ -3,4 +3,5 @@ __pycache__/
 uploads/
 evals/runs/raw/
 *.pem
+*.zip
 DIRECTOR-NOTE.mp3

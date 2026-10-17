@@ -972,10 +972,11 @@ def main() -> int:
             all_personas.append(yaml.safe_load(f))
 
     # Target selection with CORE_ORDER priority
-    CORE_ORDER = ["C01", "C02", "C03", "C05", "C07", "C08", "C11", "C16", "O1", "O2", "O3", "E01"]
+    CORE_ORDER = ["C01", "C02", "C03", "C07", "C08", "C16", "O1", "O3", "C05", "C11", "O2", "E01"]
 
     if args.persona:
-        targets = [p for p in all_personas if p.get("id") == args.persona.upper()]
+        req_pids = [x.strip().upper() for x in args.persona.split(",") if x.strip()]
+        targets = [p for p in all_personas if p.get("id", "").upper() in req_pids]
     elif args.suite == "citizens":
         targets = [p for p in all_personas if p.get("role") == "citizen"]
     elif args.suite == "officers":
