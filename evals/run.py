@@ -662,12 +662,14 @@ def run_persona(
         first_msg = run_simulator_turn(
             sim_client, sim_config["model"], persona, history, pace_seconds, max_calls
         )
-        history.append({"role": "citizen", "content": first_msg})
+        should_stop = "[END]" in first_msg
+        clean_first_msg = first_msg.replace("[END]", "").strip() or "Hello"
+        history.append({"role": "citizen", "content": clean_first_msg})
         citizen_messages += 1
 
         assistant_messages: list[dict[str, Any]] = [
             {"role": "system", "content": instructions},
-            {"role": "user", "content": first_msg},
+            {"role": "user", "content": clean_first_msg},
         ]
 
         while turns_used < turn_budget and citizen_messages <= max_msgs:
@@ -754,29 +756,20 @@ def run_persona(
             history.append({"role": "assistant", "content": reply_text})
             assistant_messages.append({"role": "assistant", "content": reply_text})
 
-            if "[END]" in reply_text:
+            # If previous simulator message requested stop, or assistant emitted [END], stop now
+            if should_stop or "[END]" in reply_text:
                 break
 
             # Simulator turn
             sim_reply = run_simulator_turn(
                 sim_client, sim_config["model"], persona, history, pace_seconds, max_calls
             )
-            history.append({"role": "citizen", "content": sim_reply})
+            should_stop = "[END]" in sim_reply
+            clean_sim_reply = sim_reply.replace("[END]", "").strip() or "Thank you, that is all."
+            history.append({"role": "citizen", "content": clean_sim_reply})
             citizen_messages += 1
 
-            clean_sim_reply = sim_reply.replace("[END]", "").strip()
             assistant_messages.append({"role": "user", "content": clean_sim_reply})
-
-            if "[END]" in sim_reply:
-                # Terminate only if goal is reached (submission, refusal, withdrawal, or query answer)
-                is_apply_goal = "apply" in persona.get("goal", "").lower()
-                has_submitted = any(t.get("name") == "submit_application" for t in tool_calls_made)
-                last_asst_text = history[-2]["content"].lower() if len(history) >= 2 else ""
-                has_terminal_response = any(
-                    w in last_asst_text for w in ("ineligible", "cannot", "window", "not eligible", "closed", "ssp26", "submitted", "withdrawn", "approved", "rejected")
-                )
-                if not is_apply_goal or has_submitted or has_terminal_response:
-                    break
 
         duration = time.time() - start_time
 
@@ -814,6 +807,7 @@ def run_persona(
             "assistant_model": asst_config.get("model"),
             "assistant_base_url": asst_config.get("base_url"),
             "simulator_model": sim_config.get("model"),
+            "simulator_base_url": sim_config.get("base_url"),
             "model_weaknesses": model_weaknesses,
             "checks": check_results,
             "check_details": check_details,
@@ -983,7 +977,9 @@ def main() -> int:
         "backend": asst_config.get("provider"),
         "backend_note": "Evaluated via official Python MCP client and OpenAI-compatible API (not Claude Code)",
         "assistant_model": asst_config.get("model"),
+        "assistant_base_url": asst_config.get("base_url"),
         "simulator_model": sim_config.get("model"),
+        "simulator_base_url": sim_config.get("base_url"),
         "total_api_calls_used": GLOBAL_API_CALLS,
         "results": [
             {
@@ -1017,7 +1013,8 @@ def main() -> int:
         "passed": passed_count,
         "pass_rate": summary_data["pass_rate"],
         "backend": asst_config.get("provider"),
-        "model": asst_config.get("model"),
+        "assistant_model": asst_config.get("model"),
+        "simulator_model": sim_config.get("model"),
     })
     with open(index_path, "w", encoding="utf-8") as f:
         json.dump(index_data, f, indent=2, default=str)
