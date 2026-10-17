@@ -100,12 +100,7 @@ ADMIN_PASS = os.environ.get("ADMIN_PASSWORD", "admin123")
 def resolve_backend_config(role_type: str = "assistant") -> dict[str, str]:
     """
     Resolves base_url, api_key, model, and provider for assistant or simulator.
-    Priority:
-      1. Role-specific env (EVAL_ASSISTANT_* or EVAL_SIMULATOR_*)
-      2. GROQ_API_KEY (https://api.groq.com/openai/v1)
-      3. GEMINI_API_KEY (https://generativelanguage.googleapis.com/v1beta/openai/)
-      4. OPENAI_API_KEY (https://api.openai.com/v1)
-      5. ANTHROPIC_API_KEY
+    Inherits GROQ_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY if role-specific key is omitted.
     """
     prefix = "EVAL_ASSISTANT_" if role_type == "assistant" else "EVAL_SIMULATOR_"
 
@@ -113,33 +108,40 @@ def resolve_backend_config(role_type: str = "assistant") -> dict[str, str]:
     custom_key = os.environ.get(f"{prefix}API_KEY")
     custom_model = os.environ.get(f"{prefix}MODEL")
 
-    if custom_url and custom_key:
-        return {
-            "provider": "openai_compatible",
-            "base_url": custom_url.rstrip("/"),
-            "api_key": custom_key,
-            "model": custom_model or ("llama-3.3-70b-versatile" if "groq" in custom_url else "gpt-4o-mini"),
-        }
+    effective_key = (
+        custom_key
+        or os.environ.get("GROQ_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or ""
+    )
 
-    # 1. Groq
-    groq_key = os.environ.get("GROQ_API_KEY")
-    if groq_key:
-        return {
-            "provider": "openai_compatible",
-            "base_url": "https://api.groq.com/openai/v1",
-            "api_key": groq_key,
-            "model": custom_model or "llama-3.3-70b-versatile",
-        }
+    if custom_url:
+        effective_url = custom_url.rstrip("/")
+    elif os.environ.get("GROQ_API_KEY"):
+        effective_url = "https://api.groq.com/openai/v1"
+    elif os.environ.get("GEMINI_API_KEY"):
+        effective_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+    elif os.environ.get("OPENAI_API_KEY"):
+        effective_url = "https://api.openai.com/v1"
+    else:
+        effective_url = ""
 
-    # 2. Gemini via OpenAI-compatible endpoint
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if gemini_key:
-        return {
-            "provider": "openai_compatible",
-            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-            "api_key": gemini_key,
-            "model": custom_model or "gemini-2.0-flash",
-        }
+    if custom_model:
+        effective_model = custom_model
+    elif role_type == "assistant":
+        effective_model = "openai/gpt-oss-20b"
+    else:
+        effective_model = "openai/gpt-oss-120b"
+
+    provider = "openai_compatible" if effective_key else "unknown"
+
+    return {
+        "provider": provider,
+        "base_url": effective_url,
+        "api_key": effective_key,
+        "model": effective_model,
+    }
 
     # 3. OpenAI
     openai_key = os.environ.get("OPENAI_API_KEY")
