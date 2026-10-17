@@ -34,7 +34,7 @@ def main():
             "_meta": MODERN_META,
         },
     }
-    res = http_post_json(f"{host}/citizen/mcp", payload, headers)
+    status, res, _ = http_post_json(f"{host}/citizen/mcp", payload, headers=headers)
     print(f"GET_MY_STATUS RESULT FOR {mobile}:")
     print(json.dumps(res, indent=2))
 
