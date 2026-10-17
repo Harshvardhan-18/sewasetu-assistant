@@ -136,3 +136,52 @@ def test_simulator_end_marker_lifecycle():
     assert "Aapka bahut dhanyawad beta!" in user_msgs
     assert not any("[END]" in m for m in user_msgs)
     assert any("Session samapt" in m for m in asst_msgs)
+
+
+def test_quota_exhausted_classified_as_error():
+    """Verify that quota exhaustion raises QuotaExhaustedError, sets status ERROR, and cleans up."""
+    fake_persona = {
+        "id": "C99",
+        "role": "citizen",
+        "name": "Test Citizen",
+        "mobile": "9990000099",
+        "turn_budget": 5,
+        "max_citizen_messages": 5,
+        "non_interference": False,
+        "must_be_true": {},
+    }
+
+    mock_client = MagicMock()
+    mock_token = MagicMock(access_token="fake-token")
+    mock_client.obtain_citizen_token.return_value = mock_token
+
+    from evals.run import QuotaExhaustedError
+
+    with patch("evals.run.cleanup_persona") as mock_cleanup, \
+         patch("evals.run.create_persona_state"), \
+         patch("evals.run.fetch_mcp_tools", return_value=[]), \
+         patch("evals.run.run_simulator_turn", return_value="Hello, apply please"), \
+         patch("evals.run.call_openai_with_backoff", side_effect=QuotaExhaustedError("Rate limit / token quota exhausted after 5 attempts")):
+
+        result = run_persona(
+            persona=fake_persona,
+            rep=1,
+            client=mock_client,
+            asst_client=MagicMock(),
+            asst_config={"model": "test-asst"},
+            sim_client=MagicMock(),
+            sim_config={"model": "test-sim"},
+            pace_seconds=0.0,
+            max_calls=10,
+        )
+
+    # Must be classified as ERROR (not FAIL)
+    assert result["status"] == "ERROR"
+    assert result["passed"] is False
+    assert result["is_error"] is True
+    assert result["error_type"] == "quota_exhaustion"
+    # Verification checks should NOT run on abort
+    assert result["checks"] == {}
+    # Guaranteed cleanup must have run
+    assert mock_cleanup.called
+

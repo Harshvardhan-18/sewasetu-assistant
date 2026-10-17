@@ -1,0 +1,52 @@
+{
+  "persona_id": "C01",
+  "rep": 1,
+  "role": "citizen",
+  "mobile": "9990000001",
+  "status": "ERROR",
+  "passed": false,
+  "is_error": true,
+  "error_type": "quota_exhaustion",
+  "error_reason": "Rate limit / token quota exhausted after 5 attempts: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199104, Requested 2658. Please try again in 12m41.184s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+  "tokens_used": {
+    "prompt": 5578,
+    "completion": 326,
+    "total": 5904
+  },
+  "turns_used": 3,
+  "citizen_messages": 2,
+  "duration_seconds": 133.58,
+  "backend": "openai_compatible",
+  "backend_note": "Evaluated via official Python MCP client and OpenAI-compatible API (not Claude Code)",
+  "assistant_model": "openai/gpt-oss-20b",
+  "assistant_base_url": "https://api.groq.com/openai/v1",
+  "simulator_model": "openai/gpt-oss-120b",
+  "simulator_base_url": "https://api.groq.com/openai/v1",
+  "model_weaknesses": [],
+  "checks": {},
+  "check_details": {
+    "aborted_reason": "Rate limit / token quota exhausted after 5 attempts: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199104, Requested 2658. Please try again in 12m41.184s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+    "error_type": "quota_exhaustion"
+  },
+  "tool_calls": [
+    "get_my_status"
+  ],
+  "history": [
+    {
+      "role": "citizen",
+      "content": "Beta, pension ke liye apply karna hai."
+    },
+    {
+      "role": "assistant",
+      "content": "\u0928\u092e\u0938\u094d\u0915\u093e\u0930! \u0915\u0943\u092a\u092f\u093e \u0905\u092a\u0928\u093e \u092a\u0942\u0930\u093e \u0928\u093e\u092e \u092c\u0924\u093e\u0907\u090f\u0964"
+    },
+    {
+      "role": "citizen",
+      "content": "Beta, mera poora naam Kamala Devi Das hai."
+    },
+    {
+      "role": "system",
+      "content": "Assistant LLM quota error: Rate limit / token quota exhausted after 5 attempts: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199104, Requested 2658. Please try again in 12m41.184s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+    }
+  ]
+}

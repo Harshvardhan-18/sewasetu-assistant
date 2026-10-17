@@ -14,74 +14,9 @@
   "simulator_model": "openai/gpt-oss-120b",
   "simulator_base_url": "https://api.groq.com/openai/v1",
   "model_weaknesses": [],
-  "checks": {
-    "db:exactly_one_pending_row": false,
-    "db:row_details_correct": false,
-    "db:doc_path_nonempty": false,
-    "db:submit_audit_row": false,
-    "tool:submit_application_called": false,
-    "transcript:no_hallucinated_amount": true,
-    "transcript:mentions_receipt": false,
-    "web:visible_on_status_portal": true,
-    "web:visible_in_admin_list": true,
-    "non_interference": true
-  },
+  "checks": {},
   "check_details": {
-    "db:exactly_one_pending_row": {
-      "sql": "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = '9990000001' AND status = 'PENDING'",
-      "expected": {
-        "cnt": 1
-      },
-      "actual": [
-        0
-      ]
-    },
-    "db:row_details_correct": {
-      "sql": "SELECT applicant_name, dob, block, ifsc, bank_account, doc_path FROM applications WHERE mobile = '9990000001' AND status = 'PENDING'\n",
-      "expected": {
-        "applicant_name": "Kamala Devi Das",
-        "dob": "1955-03-03",
-        "block": "Dhemaji Pathar",
-        "ifsc": "SBIN0003077",
-        "bank_account": "98765432101234"
-      },
-      "actual": null
-    },
-    "db:doc_path_nonempty": {
-      "sql": "SELECT doc_path FROM applications WHERE mobile = '9990000001' AND status = 'PENDING'",
-      "expected": {
-        "doc_path__nonempty": true
-      },
-      "actual": null
-    },
-    "db:submit_audit_row": {
-      "sql": "SELECT COUNT(*) AS cnt FROM audit_log al JOIN applications a ON al.application_id = a.id WHERE a.mobile = '9990000001' AND al.action = 'SUBMIT' AND al.actor = 'applicant:' || '9990000001'\n",
-      "expected": {
-        "cnt": 1
-      },
-      "actual": [
-        0
-      ]
-    },
-    "tool:submit_application_called": {
-      "called_names": [
-        "get_my_status",
-        "check_eligibility"
-      ],
-      "rule": "called"
-    },
-    "transcript:no_hallucinated_amount": {
-      "pattern": "Rs\\.?\\s*1[,.]?000",
-      "forbidden_matched": false
-    },
-    "transcript:mentions_receipt": {
-      "pattern": "(?i)(received|application number|submitted|SSP\\d+|\u0938\u092b\u0932\u0924\u093e\u092a\u0942\u0930\u094d\u0935\u0915|\u091c\u092e\u093e)",
-      "matched": false
-    },
-    "non_interference": "Non-interference verified: zero external rows modified",
-    "judge_rubric": {
-      "raw": ""
-    }
+    "aborted_reason": "Groq Tokens-Per-Day (TPD) quota exhausted (HTTP 429)"
   },
   "tool_calls": [
     "get_my_status",
@@ -120,5 +55,9 @@
       "role": "system",
       "content": "Assistant LLM error: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 197768, Requested 2837. Please try again in 4m21.36s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
     }
-  ]
+  ],
+  "status": "ERROR",
+  "is_error": true,
+  "error_type": "quota_exhaustion",
+  "error_reason": "Groq Tokens-Per-Day (TPD) quota exhausted (HTTP 429)"
 }

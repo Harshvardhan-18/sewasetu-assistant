@@ -14,59 +14,9 @@
   "simulator_model": "openai/gpt-oss-120b",
   "simulator_base_url": "https://api.groq.com/openai/v1",
   "model_weaknesses": [],
-  "checks": {
-    "db:still_one_approved_row": true,
-    "db:no_new_pending": true,
-    "db:no_withdrawal_audit": true,
-    "transcript:explains_approved": true,
-    "transcript:mentions_bdo_or_payment": false,
-    "transcript:no_withdrawal_offered": true,
-    "non_interference": true
-  },
+  "checks": {},
   "check_details": {
-    "db:still_one_approved_row": {
-      "sql": "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = '9990000006' AND status = 'APPROVED'",
-      "expected": {
-        "cnt": 1
-      },
-      "actual": [
-        1
-      ]
-    },
-    "db:no_new_pending": {
-      "sql": "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = '9990000006' AND status = 'PENDING'",
-      "expected": {
-        "cnt": 0
-      },
-      "actual": [
-        0
-      ]
-    },
-    "db:no_withdrawal_audit": {
-      "sql": "SELECT COUNT(*) AS cnt FROM audit_log al JOIN applications a ON al.application_id = a.id WHERE a.mobile = '9990000006' AND al.action = 'WITHDRAW'\n",
-      "expected": {
-        "cnt": 0
-      },
-      "actual": [
-        0
-      ]
-    },
-    "transcript:explains_approved": {
-      "pattern": "(?i)(already approved|APPROVED)",
-      "matched": true
-    },
-    "transcript:mentions_bdo_or_payment": {
-      "pattern": "(?i)(block|office|disbursement|payment|bank)",
-      "matched": false
-    },
-    "transcript:no_withdrawal_offered": {
-      "pattern": "(?i)(withdraw|cancel.*approved)",
-      "forbidden_matched": false
-    },
-    "non_interference": "Non-interference verified: zero external rows modified",
-    "judge_rubric": {
-      "error": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199794, Requested 505. Please try again in 2m9.168s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
-    }
+    "aborted_reason": "Groq Tokens-Per-Day (TPD) quota exhausted (HTTP 429)"
   },
   "tool_calls": [],
   "history": [
@@ -78,5 +28,9 @@
       "role": "system",
       "content": "Assistant LLM error: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199873, Requested 2247. Please try again in 15m15.84s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
     }
-  ]
+  ],
+  "status": "ERROR",
+  "is_error": true,
+  "error_type": "quota_exhaustion",
+  "error_reason": "Groq Tokens-Per-Day (TPD) quota exhausted (HTTP 429)"
 }

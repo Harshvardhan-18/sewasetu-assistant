@@ -14,44 +14,9 @@
   "simulator_model": "openai/gpt-oss-120b",
   "simulator_base_url": "https://api.groq.com/openai/v1",
   "model_weaknesses": [],
-  "checks": {
-    "db:pending_on_dipankars_mobile": false,
-    "db:no_second_active": false,
-    "transcript:warned_about_mobile": true,
-    "transcript:correct_applicant_name": true,
-    "non_interference": true
-  },
+  "checks": {},
   "check_details": {
-    "db:pending_on_dipankars_mobile": {
-      "sql": "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = '9990000005' AND status = 'PENDING' AND applicant_name = 'Pramila Chetia'\n",
-      "expected": {
-        "cnt": 1
-      },
-      "actual": [
-        0
-      ]
-    },
-    "db:no_second_active": {
-      "sql": "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = '9990000005' AND status IN ('PENDING','APPROVED','DEEMED_APPROVED')\n",
-      "expected": {
-        "cnt": 1
-      },
-      "actual": [
-        0
-      ]
-    },
-    "transcript:warned_about_mobile": {
-      "pattern": "(?i)(mobile|phone|contact|notification)",
-      "matched": true
-    },
-    "transcript:correct_applicant_name": {
-      "pattern": "Pramila Chetia",
-      "matched": true
-    },
-    "non_interference": "Non-interference verified: zero external rows modified",
-    "judge_rubric": {
-      "raw": "{\"scores\": [0, 0], \"reasoning\": \"The assistant did not provide any response due to a rate\u2011limit error, so it neither used the name Pramila Chetia nor informed Dipankar that his phone number would"
-    }
+    "aborted_reason": "Groq Tokens-Per-Day (TPD) quota exhausted (HTTP 429)"
   },
   "tool_calls": [],
   "history": [
@@ -63,5 +28,9 @@
       "role": "system",
       "content": "Assistant LLM error: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199323, Requested 2206. Please try again in 11m0.528s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
     }
-  ]
+  ],
+  "status": "ERROR",
+  "is_error": true,
+  "error_type": "quota_exhaustion",
+  "error_reason": "Groq Tokens-Per-Day (TPD) quota exhausted (HTTP 429)"
 }

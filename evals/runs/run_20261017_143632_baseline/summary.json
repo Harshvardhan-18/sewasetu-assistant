@@ -1,0 +1,47 @@
+{
+  "run_id": "run_20261017_143632_baseline",
+  "label": "incomplete: quota-aborted",
+  "status": "quota_aborted",
+  "timestamp": "2026-10-17T14:38:51.012336+05:30",
+  "total_evals": 1,
+  "passed": 0,
+  "failed": 0,
+  "errors": 1,
+  "valid_evals": 0,
+  "pass_rate": 0.0,
+  "cumulative_tokens": 5904,
+  "backend": "openai_compatible",
+  "backend_note": "Evaluated via official Python MCP client and OpenAI-compatible API (not Claude Code)",
+  "assistant_model": "openai/gpt-oss-20b",
+  "assistant_base_url": "https://api.groq.com/openai/v1",
+  "simulator_model": "openai/gpt-oss-120b",
+  "simulator_base_url": "https://api.groq.com/openai/v1",
+  "total_api_calls_used": 5,
+  "error_list": [
+    {
+      "persona_id": "C01",
+      "rep": 1,
+      "error_type": "quota_exhaustion",
+      "error_reason": "Rate limit / token quota exhausted after 5 attempts: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199104, Requested 2658. Please try again in 12m41.184s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+    }
+  ],
+  "results": [
+    {
+      "persona_id": "C01",
+      "rep": 1,
+      "status": "ERROR",
+      "passed": false,
+      "is_error": true,
+      "error_type": "quota_exhaustion",
+      "error_reason": "Rate limit / token quota exhausted after 5 attempts: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199104, Requested 2658. Please try again in 12m41.184s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}",
+      "turns_used": 3,
+      "tokens_used": {
+        "prompt": 5578,
+        "completion": 326,
+        "total": 5904
+      },
+      "checks": {},
+      "model_weaknesses": []
+    }
+  ]
+}

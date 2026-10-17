@@ -238,6 +238,21 @@ def sanitize_secrets(obj: Any) -> Any:
 
 # ── Rate-Limited LLM Invocation with Exponential Backoff ─────────────────────
 
+LAST_CALL_USAGE: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+LAST_RATELIMIT_HEADERS: dict[str, str] = {}
+GLOBAL_TOKEN_USAGE: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+class QuotaExhaustedError(Exception):
+    """Raised when an API provider quota (TPD/TPM) is exhausted after retries."""
+    pass
+
+
+class ConversationAbortedError(Exception):
+    """Raised when an API, network, or transport error aborts a conversation."""
+    pass
+
+
 def call_openai_with_backoff(
     client: openai.OpenAI,
     model: str,
@@ -267,22 +282,49 @@ def call_openai_with_backoff(
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
 
-            return client.chat.completions.create(**kwargs)
+            # Use with_raw_response if available to capture rate limit headers
+            if hasattr(client.chat.completions, "with_raw_response"):
+                raw_resp = client.chat.completions.with_raw_response.create(**kwargs)
+                parsed = raw_resp.parse()
+                for k, v in raw_resp.headers.items():
+                    if "ratelimit" in k.lower():
+                        LAST_RATELIMIT_HEADERS[k.lower()] = v
+            else:
+                parsed = client.chat.completions.create(**kwargs)
+
+            if hasattr(parsed, "usage") and parsed.usage:
+                LAST_CALL_USAGE["prompt_tokens"] = parsed.usage.prompt_tokens or 0
+                LAST_CALL_USAGE["completion_tokens"] = parsed.usage.completion_tokens or 0
+                LAST_CALL_USAGE["total_tokens"] = parsed.usage.total_tokens or 0
+                GLOBAL_TOKEN_USAGE["prompt_tokens"] += LAST_CALL_USAGE["prompt_tokens"]
+                GLOBAL_TOKEN_USAGE["completion_tokens"] += LAST_CALL_USAGE["completion_tokens"]
+                GLOBAL_TOKEN_USAGE["total_tokens"] += LAST_CALL_USAGE["total_tokens"]
+
+            return parsed
         except Exception as e:
             err_str = str(e)
-            is_rate_limit = "429" in err_str or "rate_limit" in err_str.lower()
+            is_rate_limit = "429" in err_str or "rate_limit" in err_str.lower() or "tokens per day" in err_str.lower()
             if is_rate_limit and attempt < max_retries - 1:
-                # Check for Retry-After
                 wait_time = 2.0 ** (attempt + 1) + random.uniform(0.1, 0.5)
-                # Parse retry header if available in exception
-                match = re.search(r"try again in ([0-9.]+)s", err_str)
-                if match:
-                    wait_time = max(wait_time, float(match.group(1)) + 0.5)
-                wait_time = min(wait_time, 25.0)
+                match_s = re.search(r"try again in ([0-9.]+)s", err_str)
+                match_m = re.search(r"try again in ([0-9.]+)m([0-9.]+)s", err_str)
+                if match_m:
+                    wait_time = max(wait_time, float(match_m.group(1)) * 60 + float(match_m.group(2)) + 0.5)
+                elif match_s:
+                    wait_time = max(wait_time, float(match_s.group(1)) + 0.5)
+                wait_time = min(wait_time, 30.0)
                 print(f"    [429 Rate Limit] Backing off for {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})...")
                 time.sleep(wait_time)
+            elif is_rate_limit:
+                raise QuotaExhaustedError(f"Rate limit / token quota exhausted after {max_retries} attempts: {err_str}")
             else:
-                raise e
+                if attempt < max_retries - 1 and any(net_err in err_str.lower() for net_err in ["timeout", "connection", "reset", "502", "503", "504"]):
+                    wait_time = 2.0 * (attempt + 1)
+                    print(f"    [Transport Error] {err_str[:80]}... Backing off {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})...")
+                    time.sleep(wait_time)
+                else:
+                    raise ConversationAbortedError(f"API/Transport error: {err_str}")
+
 
 
 # ── Tool Schema Conversion (MCP -> OpenAI) ───────────────────────────────────
@@ -437,8 +479,10 @@ def run_simulator_turn(
             max_calls=max_calls,
         )
         return resp.choices[0].message.content.strip()
+    except (QuotaExhaustedError, ConversationAbortedError):
+        raise
     except Exception as e:
-        return f"Hello, I need help with my pension application. (sim-err: {e})"
+        raise ConversationAbortedError(f"Simulator error: {e}")
 
 
 # ── Verification Checks ───────────────────────────────────────────────────────
@@ -657,148 +701,210 @@ def run_persona(
         turns_used = 0
         citizen_messages = 0
         start_time = time.time()
+        persona_tokens: dict[str, int] = {"prompt": 0, "completion": 0, "total": 0}
+        is_error = False
+        error_type = ""
+        error_reason = ""
 
         # Initial message from persona simulator
-        first_msg = run_simulator_turn(
-            sim_client, sim_config["model"], persona, history, pace_seconds, max_calls
-        )
-        should_stop = "[END]" in first_msg
-        clean_first_msg = first_msg.replace("[END]", "").strip() or "Hello"
-        history.append({"role": "citizen", "content": clean_first_msg})
-        citizen_messages += 1
-
-        assistant_messages: list[dict[str, Any]] = [
-            {"role": "system", "content": instructions},
-            {"role": "user", "content": clean_first_msg},
-        ]
-
-        while turns_used < turn_budget and citizen_messages <= max_msgs:
-            turns_used += 1
-
-            # Call Assistant Model
-            try:
-                resp = call_openai_with_backoff(
-                    client=asst_client,
-                    model=asst_config["model"],
-                    messages=assistant_messages,
-                    tools=tools_schema,
-                    max_tokens=400,
-                    pace_seconds=pace_seconds,
-                    max_calls=max_calls,
-                )
-            except Exception as e:
-                history.append({"role": "system", "content": f"Assistant LLM error: {e}"})
-                break
-
-            msg = resp.choices[0].message
-
-            # Check if model made tool calls
-            if msg.tool_calls:
-                asst_entry: dict[str, Any] = {
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in msg.tool_calls
-                    ],
-                }
-                if msg.content:
-                    asst_entry["content"] = msg.content
-                assistant_messages.append(asst_entry)
-
-                for tc in msg.tool_calls:
-                    call_name = tc.function.name
-                    raw_args = tc.function.arguments
-
-                    # Parse arguments; detect malformed tool call
-                    try:
-                        call_args = json.loads(raw_args) if raw_args else {}
-                    except Exception as json_err:
-                        model_weaknesses.append({
-                            "type": "MALFORMED_TOOL_ARGUMENTS",
-                            "tool": call_name,
-                            "raw": raw_args,
-                            "error": str(json_err),
-                        })
-                        call_args = {}
-
-                    tool_res = execute_tool_call(
-                        client, target_url, token_result.access_token, call_name, call_args
-                    )
-                    tool_calls_made.append({"name": call_name, "args": call_args, "res": tool_res})
-
-                    # Extract inner text if present for cleaner LLM context
-                    tool_content = ""
-                    if isinstance(tool_res, dict) and "result" in tool_res:
-                        content_items = tool_res["result"].get("content", [])
-                        if content_items and isinstance(content_items, list) and "text" in content_items[0]:
-                            tool_content = content_items[0]["text"]
-                    if not tool_content:
-                        tool_content = json.dumps(tool_res)
-
-                    assistant_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": call_name,
-                        "content": tool_content,
-                    })
-                # Loop back to let assistant process tool results
-                continue
-
-            # Assistant produced final text response
-            reply_text = (msg.content or "").strip()
-            history.append({"role": "assistant", "content": reply_text})
-            assistant_messages.append({"role": "assistant", "content": reply_text})
-
-            # If previous simulator message requested stop, or assistant emitted [END], stop now
-            if should_stop or "[END]" in reply_text:
-                break
-
-            # Simulator turn
-            sim_reply = run_simulator_turn(
+        try:
+            first_msg = run_simulator_turn(
                 sim_client, sim_config["model"], persona, history, pace_seconds, max_calls
             )
-            should_stop = "[END]" in sim_reply
-            clean_sim_reply = sim_reply.replace("[END]", "").strip() or "Thank you, that is all."
-            history.append({"role": "citizen", "content": clean_sim_reply})
+            persona_tokens["prompt"] += LAST_CALL_USAGE["prompt_tokens"]
+            persona_tokens["completion"] += LAST_CALL_USAGE["completion_tokens"]
+            persona_tokens["total"] += LAST_CALL_USAGE["total_tokens"]
+        except QuotaExhaustedError as qe:
+            is_error = True
+            error_type = "quota_exhaustion"
+            error_reason = str(qe)
+            history.append({"role": "system", "content": f"Simulator quota error: {qe}"})
+            first_msg = ""
+        except (ConversationAbortedError, Exception) as ae:
+            is_error = True
+            error_type = "api_transport_error"
+            error_reason = str(ae)
+            history.append({"role": "system", "content": f"Simulator error: {ae}"})
+            first_msg = ""
+
+        if not is_error:
+            should_stop = "[END]" in first_msg
+            clean_first_msg = first_msg.replace("[END]", "").strip() or "Hello"
+            history.append({"role": "citizen", "content": clean_first_msg})
             citizen_messages += 1
 
-            assistant_messages.append({"role": "user", "content": clean_sim_reply})
+            assistant_messages: list[dict[str, Any]] = [
+                {"role": "system", "content": instructions},
+                {"role": "user", "content": clean_first_msg},
+            ]
+
+            while turns_used < turn_budget and citizen_messages <= max_msgs:
+                turns_used += 1
+
+                # Call Assistant Model
+                try:
+                    resp = call_openai_with_backoff(
+                        client=asst_client,
+                        model=asst_config["model"],
+                        messages=assistant_messages,
+                        tools=tools_schema,
+                        max_tokens=400,
+                        pace_seconds=pace_seconds,
+                        max_calls=max_calls,
+                    )
+                    persona_tokens["prompt"] += LAST_CALL_USAGE["prompt_tokens"]
+                    persona_tokens["completion"] += LAST_CALL_USAGE["completion_tokens"]
+                    persona_tokens["total"] += LAST_CALL_USAGE["total_tokens"]
+                except QuotaExhaustedError as qe:
+                    is_error = True
+                    error_type = "quota_exhaustion"
+                    error_reason = str(qe)
+                    history.append({"role": "system", "content": f"Assistant LLM quota error: {qe}"})
+                    break
+                except (ConversationAbortedError, Exception) as ae:
+                    is_error = True
+                    error_type = "api_transport_error"
+                    error_reason = str(ae)
+                    history.append({"role": "system", "content": f"Assistant LLM error: {ae}"})
+                    break
+
+                msg = resp.choices[0].message
+
+                # Check if model made tool calls
+                if msg.tool_calls:
+                    asst_entry: dict[str, Any] = {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                },
+                            }
+                            for tc in msg.tool_calls
+                        ],
+                    }
+                    if msg.content:
+                        asst_entry["content"] = msg.content
+                    assistant_messages.append(asst_entry)
+
+                    for tc in msg.tool_calls:
+                        call_name = tc.function.name
+                        raw_args = tc.function.arguments
+
+                        # Parse arguments; detect malformed tool call
+                        try:
+                            call_args = json.loads(raw_args) if raw_args else {}
+                        except Exception as json_err:
+                            model_weaknesses.append({
+                                "type": "MALFORMED_TOOL_ARGUMENTS",
+                                "tool": call_name,
+                                "raw": raw_args,
+                                "error": str(json_err),
+                            })
+                            call_args = {}
+
+                        tool_res = execute_tool_call(
+                            client, target_url, token_result.access_token, call_name, call_args
+                        )
+                        tool_calls_made.append({"name": call_name, "args": call_args, "res": tool_res})
+
+                        # Extract inner text if present for cleaner LLM context
+                        tool_content = ""
+                        if isinstance(tool_res, dict) and "result" in tool_res:
+                            content_items = tool_res["result"].get("content", [])
+                            if content_items and isinstance(content_items, list) and "text" in content_items[0]:
+                                tool_content = content_items[0]["text"]
+                        if not tool_content:
+                            tool_content = json.dumps(tool_res)
+
+                        assistant_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "name": call_name,
+                            "content": tool_content,
+                        })
+                    # Loop back to let assistant process tool results
+                    continue
+
+                # Assistant produced final text response
+                reply_text = (msg.content or "").strip()
+                history.append({"role": "assistant", "content": reply_text})
+                assistant_messages.append({"role": "assistant", "content": reply_text})
+
+                # If previous simulator message requested stop, or assistant emitted [END], stop now
+                if should_stop or "[END]" in reply_text:
+                    break
+
+                # Simulator turn
+                try:
+                    sim_reply = run_simulator_turn(
+                        sim_client, sim_config["model"], persona, history, pace_seconds, max_calls
+                    )
+                    persona_tokens["prompt"] += LAST_CALL_USAGE["prompt_tokens"]
+                    persona_tokens["completion"] += LAST_CALL_USAGE["completion_tokens"]
+                    persona_tokens["total"] += LAST_CALL_USAGE["total_tokens"]
+                except QuotaExhaustedError as qe:
+                    is_error = True
+                    error_type = "quota_exhaustion"
+                    error_reason = str(qe)
+                    history.append({"role": "system", "content": f"Simulator quota error: {qe}"})
+                    break
+                except (ConversationAbortedError, Exception) as ae:
+                    is_error = True
+                    error_type = "api_transport_error"
+                    error_reason = str(ae)
+                    history.append({"role": "system", "content": f"Simulator error: {ae}"})
+                    break
+
+                should_stop = "[END]" in sim_reply
+                clean_sim_reply = sim_reply.replace("[END]", "").strip() or "Thank you, that is all."
+                history.append({"role": "citizen", "content": clean_sim_reply})
+                citizen_messages += 1
+
+                assistant_messages.append({"role": "user", "content": clean_sim_reply})
 
         duration = time.time() - start_time
 
-        # Step 5: Verification Checks
-        try:
-            db_conn = get_db_connection()
-        except Exception:
-            pass
+        # Step 5: Verification Checks (Run ONLY if conversation was not aborted by error)
+        if is_error:
+            check_results: dict[str, bool] = {}
+            check_details: dict[str, Any] = {"aborted_reason": error_reason, "error_type": error_type}
+            all_passed = False
+            status = "ERROR"
+        else:
+            try:
+                db_conn = get_db_connection()
+            except Exception:
+                pass
 
-        check_results, check_details = run_checks(
-            persona,
-            history,
-            tool_calls_made,
-            db_conn,
-            snapshot_before,
-            asst_client,
-            asst_config["model"],
-            pace_seconds,
-            max_calls,
-        )
-
-        all_passed = all(check_results.values()) if check_results else False
+            check_results, check_details = run_checks(
+                persona,
+                history,
+                tool_calls_made,
+                db_conn,
+                snapshot_before,
+                asst_client,
+                asst_config["model"],
+                pace_seconds,
+                max_calls,
+            )
+            all_passed = all(check_results.values()) if check_results else False
+            status = "PASS" if all_passed else "FAIL"
 
         result_payload = {
             "persona_id": p_id,
             "rep": rep,
             "role": role,
             "mobile": mobile,
+            "status": status,
             "passed": all_passed,
+            "is_error": is_error,
+            "error_type": error_type if is_error else None,
+            "error_reason": error_reason if is_error else None,
+            "tokens_used": persona_tokens,
             "turns_used": turns_used,
             "citizen_messages": citizen_messages,
             "duration_seconds": round(duration, 2),
@@ -815,6 +921,7 @@ def run_persona(
             "history": history,
         }
         return sanitize_secrets(result_payload)
+
 
     finally:
         if db_conn:
@@ -864,7 +971,9 @@ def main() -> int:
         with open(yp, "r", encoding="utf-8") as f:
             all_personas.append(yaml.safe_load(f))
 
-    # Target selection
+    # Target selection with CORE_ORDER priority
+    CORE_ORDER = ["C01", "C02", "C03", "C05", "C07", "C08", "C11", "C16", "O1", "O2", "O3", "E01"]
+
     if args.persona:
         targets = [p for p in all_personas if p.get("id") == args.persona.upper()]
     elif args.suite == "citizens":
@@ -880,6 +989,15 @@ def main() -> int:
         print(f"Error: No personas found matching criteria (persona={args.persona}, suite={args.suite})")
         return 1
 
+    # Order core personas first in the exact required order, followed by the rest
+    def persona_sort_key(p: dict[str, Any]) -> tuple[int, int | str]:
+        pid = p.get("id", "")
+        if pid in CORE_ORDER:
+            return (0, CORE_ORDER.index(pid))
+        return (1, pid)
+
+    targets.sort(key=persona_sort_key)
+
     # Print token and cost estimates
     total_runs = len(targets) * args.reps
     print("\n==================================================================")
@@ -889,7 +1007,7 @@ def main() -> int:
     print(f"  Assistant Base URL:     {asst_config['base_url'] or '(native)'}")
     print(f"  Assistant Model:        {asst_config['model']}")
     print(f"  Simulator Model:        {sim_config['model']}")
-    print(f"  Personas in Run:        {len(targets)}")
+    print(f"  Personas in Run:        {len(targets)} (Core: {len([p for p in targets if p.get('id') in CORE_ORDER])})")
     print(f"  Reps per Persona:       {args.reps}")
     print(f"  Total Conversations:    {total_runs}")
     print(f"  Pacing Delay:           {args.pace_seconds}s per call")
@@ -916,38 +1034,59 @@ def main() -> int:
 
     if args.run_id:
         run_id = args.run_id
+    elif args.resume:
+        runs_dir_pattern = os.path.join(os.path.dirname(__file__), "runs", f"*_{args.label}")
+        matching_dirs = sorted(glob.glob(runs_dir_pattern))
+        resume_dir = None
+        for md in reversed(matching_dirs):
+            sum_f = os.path.join(md, "summary.json")
+            if os.path.exists(sum_f):
+                try:
+                    with open(sum_f, "r", encoding="utf-8") as f:
+                        s_data = json.load(f)
+                    if s_data.get("label") == args.label:
+                        resume_dir = md
+                        break
+                except Exception:
+                    pass
+        if resume_dir:
+            run_id = os.path.basename(resume_dir)
+            print(f"  [RESUME] Continuing existing active run directory: {run_id}")
+        else:
+            run_id = f"run_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}_{args.label}"
     else:
         run_id = f"run_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}_{args.label}"
+
+
     runs_dir = os.path.join(os.path.dirname(__file__), "runs", run_id)
     os.makedirs(runs_dir, exist_ok=True)
 
     print(f"Starting Evaluation Run: {run_id}")
     print(f"Results directory: {runs_dir}\n")
 
-    results_summary = []
-    passed_count = 0
-    total_count = 0
+    results_summary: list[dict[str, Any]] = []
+    cumulative_tokens = 0
+    quota_aborted = False
 
     for persona in targets:
         p_id = persona.get("id")
         for rep in range(1, args.reps + 1):
             out_file = os.path.join(runs_dir, f"{p_id}-rep{rep}.json")
 
-            # Resume check: skip already-passed runs
+            # Resume check: skip already-passed runs (only if status == "PASS" or passed and not is_error)
             if args.resume and os.path.exists(out_file):
                 try:
                     with open(out_file, "r", encoding="utf-8") as f:
                         prev = json.load(f)
-                    if prev.get("passed"):
+                    if prev.get("status") == "PASS" or (prev.get("passed") and not prev.get("is_error")):
                         print(f"  [RESUME] Persona {p_id} (Rep {rep}) already PASSED. Skipping.")
                         results_summary.append(prev)
-                        total_count += 1
-                        passed_count += 1
+                        p_tok = prev.get("tokens_used", {}).get("total", 0)
+                        cumulative_tokens += p_tok
                         continue
                 except Exception:
                     pass
 
-            total_count += 1
             run_data = run_persona(
                 persona=persona,
                 rep=rep,
@@ -961,23 +1100,51 @@ def main() -> int:
                 keep_data=args.keep,
             )
 
-            if run_data.get("passed"):
-                passed_count += 1
             results_summary.append(run_data)
 
-            # Persist individual run result
+            # Persist individual run result immediately
             with open(out_file, "w", encoding="utf-8") as f:
                 json.dump(run_data, f, indent=2, default=str)
 
+            p_tokens = run_data.get("tokens_used", {}).get("total", 0)
+            cumulative_tokens += p_tokens
+            rem_rpm = LAST_RATELIMIT_HEADERS.get("x-ratelimit-remaining-tokens", "N/A")
+            status_str = run_data.get("status", "PASS" if run_data.get("passed") else "FAIL")
+
+            print(f"  [Result] Persona {p_id} (Rep {rep}) -> {status_str} | Turns: {run_data.get('turns_used')} | Tokens: {p_tokens:,} (Run Total: {cumulative_tokens:,} | RPM Rem: {rem_rpm})")
+
+            # On quota exhaustion (5 backoffs), checkpoint and exit cleanly
+            if run_data.get("is_error") and run_data.get("error_type") == "quota_exhaustion":
+                print(f"\n[QUOTA CHECKPOINT] Provider token quota exhausted at Persona {p_id}. Checkpointing run cleanly so --resume continues later...")
+                quota_aborted = True
+                break
+
+        if quota_aborted:
+            break
+
     # Persist summary
+    passed_count = sum(1 for r in results_summary if r.get("status") == "PASS" or (r.get("passed") and not r.get("is_error")))
+    failed_count = sum(1 for r in results_summary if (r.get("status") == "FAIL" or not r.get("passed")) and not r.get("is_error") and r.get("status") != "ERROR")
+    error_count = sum(1 for r in results_summary if r.get("status") == "ERROR" or r.get("is_error"))
+    valid_evals = passed_count + failed_count
+    pass_rate = round((passed_count / valid_evals) * 100, 1) if valid_evals > 0 else 0.0
+
+    run_status = "quota_aborted" if quota_aborted else ("completed" if len(results_summary) == total_runs else "in_progress")
+    display_label = f"incomplete: quota-aborted" if (quota_aborted or run_status == "quota_aborted") else args.label
+
     summary_path = os.path.join(runs_dir, "summary.json")
     summary_data = {
         "run_id": run_id,
-        "label": args.label,
+        "label": display_label,
+        "status": run_status,
         "timestamp": datetime.now(IST).isoformat(),
-        "total_evals": total_count,
+        "total_evals": len(results_summary),
         "passed": passed_count,
-        "pass_rate": round((passed_count / total_count) * 100, 1) if total_count else 0,
+        "failed": failed_count,
+        "errors": error_count,
+        "valid_evals": valid_evals,
+        "pass_rate": pass_rate,
+        "cumulative_tokens": cumulative_tokens,
         "backend": asst_config.get("provider"),
         "backend_note": "Evaluated via official Python MCP client and OpenAI-compatible API (not Claude Code)",
         "assistant_model": asst_config.get("model"),
@@ -985,12 +1152,27 @@ def main() -> int:
         "simulator_model": sim_config.get("model"),
         "simulator_base_url": sim_config.get("base_url"),
         "total_api_calls_used": GLOBAL_API_CALLS,
+        "error_list": [
+            {
+                "persona_id": r["persona_id"],
+                "rep": r["rep"],
+                "error_type": r.get("error_type"),
+                "error_reason": r.get("error_reason"),
+            }
+            for r in results_summary
+            if r.get("is_error")
+        ],
         "results": [
             {
                 "persona_id": r["persona_id"],
                 "rep": r["rep"],
-                "passed": r["passed"],
+                "status": r.get("status", "PASS" if r.get("passed") else "FAIL"),
+                "passed": r.get("passed", False),
+                "is_error": r.get("is_error", False),
+                "error_type": r.get("error_type"),
+                "error_reason": r.get("error_reason"),
                 "turns_used": r["turns_used"],
+                "tokens_used": r.get("tokens_used", {}),
                 "checks": r["checks"],
                 "model_weaknesses": r.get("model_weaknesses", []),
             }
@@ -1009,31 +1191,54 @@ def main() -> int:
                 index_data = json.load(f)
         except Exception:
             index_data = []
-    index_data.append({
+
+    # Replace existing entry for this run_id if present, else append
+    existing_idx = None
+    for i, entry in enumerate(index_data):
+        if entry.get("run_id") == run_id:
+            existing_idx = i
+            break
+
+    run_entry = {
         "run_id": run_id,
-        "label": args.label,
+        "label": display_label,
+        "status": run_status,
         "timestamp": summary_data["timestamp"],
-        "total": total_count,
+        "total": len(results_summary),
         "passed": passed_count,
-        "pass_rate": summary_data["pass_rate"],
+        "failed": failed_count,
+        "errors": error_count,
+        "valid_evals": valid_evals,
+        "pass_rate": pass_rate,
         "backend": asst_config.get("provider"),
         "assistant_model": asst_config.get("model"),
         "simulator_model": sim_config.get("model"),
-    })
+    }
+    if existing_idx is not None:
+        index_data[existing_idx] = run_entry
+    else:
+        index_data.append(run_entry)
+
     with open(index_path, "w", encoding="utf-8") as f:
         json.dump(index_data, f, indent=2, default=str)
 
     print("\n==================================================================")
     print("                    EVALUATION RUN COMPLETE")
     print("==================================================================")
-    print(f"  Run ID:    {run_id}")
-    print(f"  Total:     {total_count}")
-    print(f"  Passed:    {passed_count}")
-    print(f"  Pass Rate: {summary_data['pass_rate']}%")
-    print(f"  API Calls: {GLOBAL_API_CALLS} / {args.max_calls}")
-    print(f"  Summary:   {summary_path}")
+    print(f"  Run ID:      {run_id}")
+    print(f"  Status:      {run_status}")
+    print(f"  Total Evals: {len(results_summary)}")
+    print(f"  Passed:      {passed_count}")
+    print(f"  Failed:      {failed_count}")
+    print(f"  Errors:      {error_count} (excluded from pass rate)")
+    print(f"  Valid Evals: {valid_evals}")
+    print(f"  Pass Rate:   {pass_rate}%")
+    print(f"  Tokens Used: {cumulative_tokens:,}")
+    print(f"  API Calls:   {GLOBAL_API_CALLS} / {args.max_calls}")
+    print(f"  Summary:     {summary_path}")
     print("==================================================================\n")
-    return 0 if passed_count == total_count else 1
+    return 0 if (failed_count == 0 and not quota_aborted) else 1
+
 
 
 if __name__ == "__main__":

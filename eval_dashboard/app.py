@@ -100,9 +100,13 @@ def get_runs_index() -> list[dict[str, Any]]:
                     runs.append({
                         "run_id": r_id,
                         "label": s.get("label", r_id),
+                        "status": s.get("status", "completed"),
                         "timestamp": s.get("timestamp", ""),
                         "total": s.get("total_evals", 0),
                         "passed": s.get("passed", 0),
+                        "failed": s.get("failed", 0),
+                        "errors": s.get("errors", 0),
+                        "valid_evals": s.get("valid_evals", s.get("passed", 0) + s.get("failed", 0)),
                         "pass_rate": s.get("pass_rate", 0),
                         "backend": s.get("backend", "openai_compatible"),
                         "assistant_model": s.get("assistant_model", "unknown"),
@@ -111,6 +115,7 @@ def get_runs_index() -> list[dict[str, Any]]:
             except Exception:
                 pass
     return runs
+
 
 
 def get_run_details(run_id: str) -> dict[str, Any]:
@@ -362,26 +367,33 @@ def index():
     # Calculate statistics for selected run
     results = run_data.get("results", [])
     total_evals = len(results)
-    passed_evals = sum(1 for r in results if r.get("passed"))
-    pass_rate = round((passed_evals / total_evals) * 100, 1) if total_evals > 0 else 0
+    passed_evals = sum(1 for r in results if r.get("status") == "PASS" or (r.get("passed") and not r.get("is_error")))
+    error_evals = sum(1 for r in results if r.get("status") == "ERROR" or r.get("is_error"))
+    failed_evals = sum(1 for r in results if (r.get("status") == "FAIL" or not r.get("passed")) and not r.get("is_error") and r.get("status") != "ERROR")
+    valid_evals = passed_evals + failed_evals
+    pass_rate = round((passed_evals / valid_evals) * 100, 1) if valid_evals > 0 else 0.0
 
     role_counts = {
-        "citizen": {"total": 0, "passed": 0},
-        "officer": {"total": 0, "passed": 0},
-        "chained": {"total": 0, "passed": 0},
+        "citizen": {"total": 0, "passed": 0, "failed": 0, "errors": 0},
+        "officer": {"total": 0, "passed": 0, "failed": 0, "errors": 0},
+        "chained": {"total": 0, "passed": 0, "failed": 0, "errors": 0},
     }
     for r in results:
         role = r.get("role", "citizen")
         if role in role_counts:
             role_counts[role]["total"] += 1
-            if r.get("passed"):
+            if r.get("status") == "PASS" or (r.get("passed") and not r.get("is_error")):
                 role_counts[role]["passed"] += 1
+            elif r.get("status") == "ERROR" or r.get("is_error"):
+                role_counts[role]["errors"] += 1
+            else:
+                role_counts[role]["failed"] += 1
 
-    # Headline trend logic: Only compare full runs (total > 1, no smoke runs)
-    # Show nothing until at least two full runs exist
+    # Headline trend logic: Only compare full runs (total > 1, no smoke runs, not quota-aborted)
+    # Show nothing until at least two full valid runs exist
     full_runs = [
         r for r in runs_index
-        if r.get("total", 0) > 1 and "smoke" not in r.get("label", "").lower()
+        if r.get("total", 0) > 1 and "smoke" not in r.get("label", "").lower() and "aborted" not in r.get("label", "").lower() and "aborted" not in r.get("status", "").lower()
     ]
     has_two_full_runs = len(full_runs) >= 2
     first_full_run = full_runs[-1] if has_two_full_runs else None
@@ -395,6 +407,9 @@ def index():
         results=results,
         total_evals=total_evals,
         passed_evals=passed_evals,
+        failed_evals=failed_evals,
+        error_evals=error_evals,
+        valid_evals=valid_evals,
         pass_rate=pass_rate,
         role_counts=role_counts,
         has_two_full_runs=has_two_full_runs,
@@ -405,6 +420,7 @@ def index():
         security_checks=security_checks,
         coverage_rules=coverage_matrix,
     )
+
 
 
 @app.route("/eval-dashboard/persona/<run_id>/<persona_id>")
