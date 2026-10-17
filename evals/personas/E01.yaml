@@ -1,0 +1,96 @@
+id: E01
+role: chained
+name: Minoti Barua
+age: 68
+village: Sonari Tiniali
+block: Sonari
+mobile: "9990000051"
+
+why_this_person: |
+  End-to-end chained lifecycle scenario (the Director's own test path).
+  Tests the complete cross-role, cross-channel lifecycle:
+  1. Citizen Minoti Barua applies through the citizen assistant via the shared
+     submission pipeline (creating a PENDING row and SUBMIT audit record).
+  2. Officer Assistant (admin) inspects the pending queue, runs verify_application,
+     and approves Minoti's application with a human-authored reason.
+  3. Verification across both channels:
+     - Portal database has status APPROVED, decided_by 'admin'.
+     - Audit log has exactly two chronological records: SUBMIT (applicant:9990000051)
+       followed by APPROVED (admin:admin) with reason prefixed 'via officer assistant:'.
+     - Citizen's web status portal (/status) shows APPROVED.
+     - Citizen's get_my_status shows APPROVED and clean officer reason.
+     - Portal admin list (/admin) displays the approved status.
+
+how_they_talk: |
+  Citizen: Polite Assamese-English.
+  - "Namaskar, I want to apply for pension. Name Minoti Barua."
+  - "DOB: 10/10/1956. Bank: 99880011223344, IFSC: SBIN0001234."
+  - "Doc: https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/e01_citizen_aadhar.jpg"
+  Officer: Brisk English.
+  - "List pending applications for Sonari."
+  - "Verify application for Minoti Barua."
+  - "Approve with note: Eligibility confirmed from age proof."
+
+goal: "Citizen submits pension application; officer reviews, verifies, and approves it."
+
+private_facts:
+  citizen:
+    dob: "10/10/1956"
+    gender: Female
+    marital_status: Married
+    husband_name: "Biren Barua"
+    village: "Sonari Tiniali"
+    block: "Sonari"
+    bank_account: "99880011223344"
+    ifsc: "SBIN0001234"
+    doc_url: "https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/e01_citizen_aadhar.jpg"
+    document_available: true
+  officer:
+    username: admin
+    password: admin123
+
+files:
+  e01_citizen_aadhar.jpg: evals/assets/e01_citizen_aadhar.jpg
+
+fixtures: []
+
+turn_budget: 24
+max_citizen_messages: 24
+
+must_be_true:
+  db:
+    - name: application_approved_by_admin
+      sql: "SELECT status, decided_by FROM applications WHERE mobile = %(mobile)s"
+      expect_row: {status: "APPROVED", decided_by: "admin"}
+    - name: full_audit_trail_in_order
+      sql: >
+        SELECT action, actor FROM audit_log al
+        JOIN applications a ON al.application_id = a.id
+        WHERE a.mobile = %(mobile)s
+        ORDER BY al.id ASC
+      expect_rows:
+        - {action: "SUBMIT", actor: "applicant:9990000051"}
+        - {action: "APPROVED", actor: "admin:admin"}
+  tool_calls:
+    - name: submit_application_called
+      tool: submit_application
+      check: called
+    - name: verify_application_called
+      tool: verify_application
+      check: called
+    - name: decide_application_called
+      tool: decide_application
+      check: called
+  web:
+    - name: visible_on_status_portal_as_approved
+      as: citizen
+      check: status_page_shows_approved_for_mobile
+    - name: visible_in_admin_list_as_approved
+      as: admin
+      check: admin_list_shows_approved_for_mobile
+  judge:
+    - "Citizen submitted successfully and received an application number."
+    - "Officer verified and approved the case with a recorded reason."
+    - "Database and web views reflect the approved state consistently."
+
+non_interference: true

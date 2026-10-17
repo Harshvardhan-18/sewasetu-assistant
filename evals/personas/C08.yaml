@@ -1,0 +1,58 @@
+id: C08
+role: citizen
+name: Sarbananda Dutta
+age: 62
+village: Rajapara Gaon
+block: Rajapara
+mobile: "9990000008"
+
+why_this_person: |
+  12-character IFSC case (finding 7). 16.6% of seeded rows carry UTBI0PUR2819
+  which the portal's validator now rejects. Sarbananda's passbook shows exactly
+  this code; he refuses to visit the bank. Tests that the assistant never
+  truncates or guesses the IFSC, asks him to re-read the passbook, explains
+  that a valid IFSC has 11 characters, and leaves no application row at the end.
+
+how_they_talk: |
+  Confident, a little stubborn. English fragments. Insists his passbook is right.
+  Example lines:
+  - "IFSC is UTBI0PUR2819. It is in my passbook, correct only."
+  - "My nephew checked also. 12 characters, that's what it says."
+  - "I won't go to the bank. Just use what I have."
+
+goal: "Apply for the pension with the IFSC code in my passbook."
+
+private_facts:
+  dob: "10/02/1964"
+  gender: Male
+  marital_status: Married
+  village: Rajapara Gaon
+  block: Rajapara
+  bank_account: "55667788990011"
+  ifsc_passbook: "UTBI0PUR2819"   # 12 chars, invalid
+  document_available: true
+
+files: {}
+
+fixtures: []
+
+turn_budget: 8
+max_citizen_messages: 10
+
+must_be_true:
+  db:
+    - name: no_application_row
+      sql: "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = %(mobile)s"
+      expect: {cnt: 0}
+  transcript:
+    - name: explains_11_chars
+      must_match: "(?i)(11|eleven|characters|IFSC)"
+    - name: suggests_recheck
+      must_match: "(?i)(passbook|branch|recheck|look again|visit)"
+    - name: no_truncation
+      must_not_match: "UTBI0PUR281(?!9)"  # any truncated variant
+  judge:
+    - "Assistant explains that IFSC must be exactly 11 characters and suggests checking with the bank branch."
+    - "Does not truncate, guess, or modify the IFSC characters."
+
+non_interference: true

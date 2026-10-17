@@ -1,0 +1,98 @@
+id: C07
+role: citizen
+name: Lakhimi Talukdar
+age: 63
+village: Sonari Chariali
+block: Sonari
+mobile: "9990000007"
+
+why_this_person: |
+  Withdraw + resubmit flow for correcting a wrong bank account. Tests finding 8:
+  there is no "edit" — the only path is withdraw (with explicit consent) then
+  resubmit. The assistant must pre-fill the new draft from the old application
+  to avoid re-collecting every field. Tests that the old row is WITHDRAWN, that
+  a new PENDING row is created with the corrected account, and that exactly one
+  active row remains at the end. Consent for withdrawal must be recorded.
+
+how_they_talk: |
+  Careful, slow. Polite Assamese-English. Double-checks every step.
+  Example lines:
+  - "Mera application tha, but account number galat ho gaya."
+  - "Old one: ends with 1234. Sahi wala 1243 hai."
+  - "Haan, withdraw kar do, phr sahi wala dalo."
+
+goal: "Fix the wrong bank account number in my pending application."
+
+private_facts:
+  dob: "05/07/1963"
+  gender: Female
+  marital_status: Married
+  husband_name: "Bhuban Talukdar"
+  village: "Sonari Chariali"
+  block: Sonari
+  correct_bank_account: "99887766551243"
+  old_bank_account: "99887766551234"
+  ifsc: "SBIN0001234"
+  doc_url: "https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c07_lakhimi_aadhar.jpg"
+  document_available: true
+
+files:
+  c07_lakhimi_aadhar.jpg: evals/assets/c07_lakhimi_aadhar.jpg
+
+fixtures:
+  - type: sql
+    statement: >
+      INSERT INTO applications
+        (application_no, applicant_name, mobile, dob, gender, marital_status,
+         husband_name, village, block, bank_account, ifsc, doc_path,
+         status, submitted_at)
+      VALUES
+        ('SSP26990007', 'Lakhimi Talukdar', '9990000007',
+         '1963-07-05', 'Female', 'Married', 'Bhuban Talukdar',
+         'Sonari Chariali', 'Sonari',
+         '99887766551234', 'SBIN0001234',
+         '/docs/c07_proof.jpg', 'PENDING',
+         NOW() AT TIME ZONE 'UTC' - INTERVAL '3 days')
+      ON CONFLICT DO NOTHING
+  - type: sql
+    statement: >
+      INSERT INTO audit_log (application_id, action, actor, note, at)
+      SELECT id, 'SUBMIT', 'applicant:9990000007', 'via citizen assistant', NOW() AT TIME ZONE 'UTC' - INTERVAL '3 days'
+      FROM applications WHERE application_no = 'SSP26990007' AND mobile = '9990000007'
+
+turn_budget: 14
+max_citizen_messages: 16
+
+must_be_true:
+  db:
+    - name: old_row_withdrawn
+      sql: "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = %(mobile)s AND status = 'WITHDRAWN'"
+      expect: {cnt: 1}
+    - name: new_row_pending_with_correct_account
+      sql: >
+        SELECT COUNT(*) AS cnt FROM applications
+        WHERE mobile = %(mobile)s AND status = 'PENDING'
+        AND bank_account = '99887766551243'
+      expect: {cnt: 1}
+    - name: exactly_one_active
+      sql: >
+        SELECT COUNT(*) AS cnt FROM applications
+        WHERE mobile = %(mobile)s
+        AND status IN ('PENDING','APPROVED','DEEMED_APPROVED')
+      expect: {cnt: 1}
+    - name: withdraw_audit_present
+      sql: >
+        SELECT COUNT(*) AS cnt FROM audit_log al
+        JOIN applications a ON al.application_id = a.id
+        WHERE a.mobile = %(mobile)s AND al.action = 'WITHDRAW'
+      expect: {cnt: 1}
+  transcript:
+    - name: consent_asked
+      must_match: "(?i)(withdraw|confirm|sure|consent)"
+    - name: corrected_account_confirmed
+      must_match: "1243"
+  judge:
+    - "Assistant asked for explicit consent before withdrawing the old application."
+    - "New application retains all other details from the old one (name, DOB, IFSC)."
+
+non_interference: true

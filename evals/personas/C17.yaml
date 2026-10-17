@@ -1,0 +1,61 @@
+id: C17
+role: citizen
+name: Jahanara Begum
+age: 65
+village: Borgaon Bazar
+block: Borgaon
+mobile: "9990000017"
+
+why_this_person: |
+  DOB-unknown / document-mismatch case. Jahanara says "about 65, born the year
+  of the big flood" and has no document with her — only a voter ID that says
+  "Jahanara Begum Talukdar" (slightly different surname). Tests that the
+  assistant never guesses or estimates a DOB, never saves a draft with an
+  estimated date, asks for the date printed on her official proof, and explains
+  what she can bring next time. DB must be empty at the end.
+
+how_they_talk: |
+  Elderly, vague about dates. Mixes Assamese and simple English.
+  Her son sits with her but doesn't know the exact DOB either.
+  Example lines:
+  - "Age hobo 65 or thereabouts. Flood-er bosor jono janmo."
+  - "Voter ID aase, kintu DOB likha naai exactly."
+  - "Can you guess? Maybe 1961?"
+
+goal: "Apply for the pension — I'm about 65 years old."
+
+private_facts:
+  approximate_age: 65
+  # Exact DOB unknown to her; she has no document with a date printed
+  voter_id_name: "Jahanara Begum Talukdar"
+  gender: Female
+  marital_status: Married
+  village: Borgaon Bazar
+  block: Borgaon
+  document_available: false   # will not supply a doc during this session
+
+files: {}
+fixtures: []
+
+turn_budget: 8
+max_citizen_messages: 10
+
+must_be_true:
+  db:
+    - name: no_application_row
+      sql: "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = %(mobile)s"
+      expect: {cnt: 0}
+    - name: no_draft_saved
+      sql: "SELECT COUNT(*) AS cnt FROM assistant_drafts WHERE mobile = %(mobile)s"
+      expect: {cnt: 0}
+  transcript:
+    - name: no_estimated_dob
+      must_not_match: "(?i)(I.ll.*use|estimate|assume.*1961|guess.*DOB)"
+    - name: asks_for_printed_date
+      must_match: "(?i)(printed|document|Aadhaar|birth certificate|bring)"
+  judge:
+    - "Assistant does not guess or fill in an estimated DOB."
+    - "Tells Jahanara what document to bring (Aadhaar, birth certificate) and what date to look for."
+    - "No draft is retained after the conversation."
+
+non_interference: true

@@ -1,0 +1,71 @@
+id: C05
+role: citizen
+name: Dipankar Chetia
+age: 41
+village: Dhanajori
+block: Sonari
+mobile: "9990000005"
+
+why_this_person: |
+  Helper/relative case: Dipankar types from his OWN phone on behalf of his
+  mother Pramila Chetia (74, cannot read). Tests that (a) the application is
+  created on Dipankar's mobile (the signed-in mobile), (b) the applicant_name
+  is Pramila Chetia (not Dipankar), (c) the assistant warns Dipankar that his
+  phone is now the contact for this application and cannot be used for another
+  active application. Validates that identity comes from the token, not from
+  applicant-provided data.
+
+how_they_talk: |
+  Dipankar: Modern, English-heavy, slightly impatient. Explains things simply
+  for his mother. Types quickly. Example lines:
+  - "I am applying for my mother. Her name is Pramila Chetia, she is 74."
+  - "DOB: 15/06/1952. Bank account her name but I have the details."
+  - "Yes, notifications to my number only, she doesn't have a phone."
+
+goal: "Apply for my mother Pramila's pension from my phone."
+
+private_facts:
+  applicant_name: "Pramila Chetia"
+  dob: "15/06/1952"
+  gender: Female
+  marital_status: Widow
+  husband_name: "Late Tularam Chetia"
+  village: "Dhanajori"
+  block: Sonari
+  bank_account: "33445566778899"
+  ifsc: "SBIN0006701"
+  doc_url: "https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c05_pramila_aadhar.jpg"
+  document_available: true
+
+files:
+  c05_pramila_aadhar.jpg: evals/assets/c05_pramila_aadhar.jpg
+
+fixtures: []
+
+turn_budget: 10
+max_citizen_messages: 12
+
+must_be_true:
+  db:
+    - name: pending_on_dipankars_mobile
+      sql: >
+        SELECT COUNT(*) AS cnt FROM applications
+        WHERE mobile = %(mobile)s AND status = 'PENDING'
+        AND applicant_name = 'Pramila Chetia'
+      expect: {cnt: 1}
+    - name: no_second_active
+      sql: >
+        SELECT COUNT(*) AS cnt FROM applications
+        WHERE mobile = %(mobile)s
+        AND status IN ('PENDING','APPROVED','DEEMED_APPROVED')
+      expect: {cnt: 1}
+  transcript:
+    - name: warned_about_mobile
+      must_match: "(?i)(mobile|phone|contact|notification)"
+    - name: correct_applicant_name
+      must_match: "Pramila Chetia"
+  judge:
+    - "Assistant used Pramila Chetia as the applicant name, not Dipankar."
+    - "Assistant told Dipankar that his phone number will receive OTPs/notifications."
+
+non_interference: true

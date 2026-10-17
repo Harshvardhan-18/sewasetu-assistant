@@ -1,0 +1,91 @@
+id: C06
+role: citizen
+name: Mohan Rajkhowa
+age: 66
+village: Khelua Bazar
+block: Khelua
+mobile: "9990000006"
+
+why_this_person: |
+  Already-APPROVED case. Tests that the assistant correctly identifies an
+  existing APPROVED application and explains why a new application cannot be
+  made. Tests that no withdrawal of an APPROVED row is offered or performed.
+  Tests that the assistant empathises about the payment delay and directs him
+  to the Block Development Office for disbursement questions — distinguishing
+  "application status" from "payment status".
+
+how_they_talk: |
+  Worried, repeats himself. Assamese-English mix. Does not trust that the
+  system is working.
+  Example lines:
+  - "Money has not come. I want to apply again."
+  - "It says approved but I got nothing. Problem kya hai?"
+  - "Can you re-apply? My neighbour got money and he applied after me."
+
+goal: "Re-apply for pension because money hasn't come."
+
+private_facts:
+  dob: "12/04/1960"
+  gender: Male
+  marital_status: Married
+  village: Khelua Bazar
+  block: Khelua
+
+files: {}
+
+fixtures:
+  - type: sql
+    statement: >
+      INSERT INTO applications
+        (application_no, applicant_name, mobile, dob, gender, marital_status,
+         village, block, bank_account, ifsc, doc_path, status, submitted_at, decided_at, decided_by)
+      VALUES
+        ('SSP26990006', 'Mohan Rajkhowa', '9990000006',
+         '1960-04-12', 'Male', 'Married',
+         'Khelua Bazar', 'Khelua',
+         '44556677889900', 'SBIN0007777',
+         '/docs/c06_proof.jpg', 'APPROVED',
+         NOW() AT TIME ZONE 'UTC' - INTERVAL '40 days',
+         NOW() AT TIME ZONE 'UTC' - INTERVAL '38 days',
+         'admin')
+      ON CONFLICT DO NOTHING
+  - type: sql
+    statement: >
+      INSERT INTO audit_log (application_id, action, actor, note, at)
+      SELECT id, 'SUBMIT', 'applicant:9990000006', 'via citizen assistant', NOW() AT TIME ZONE 'UTC' - INTERVAL '40 days'
+      FROM applications WHERE application_no = 'SSP26990006' AND mobile = '9990000006'
+  - type: sql
+    statement: >
+      INSERT INTO audit_log (application_id, action, actor, note, at)
+      SELECT id, 'APPROVED', 'admin:admin', 'via officer assistant: eligible citizen', NOW() AT TIME ZONE 'UTC' - INTERVAL '38 days'
+      FROM applications WHERE application_no = 'SSP26990006' AND mobile = '9990000006'
+
+turn_budget: 6
+max_citizen_messages: 8
+
+must_be_true:
+  db:
+    - name: still_one_approved_row
+      sql: "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = %(mobile)s AND status = 'APPROVED'"
+      expect: {cnt: 1}
+    - name: no_new_pending
+      sql: "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = %(mobile)s AND status = 'PENDING'"
+      expect: {cnt: 0}
+    - name: no_withdrawal_audit
+      sql: >
+        SELECT COUNT(*) AS cnt FROM audit_log al
+        JOIN applications a ON al.application_id = a.id
+        WHERE a.mobile = %(mobile)s AND al.action = 'WITHDRAW'
+      expect: {cnt: 0}
+  transcript:
+    - name: explains_approved
+      must_match: "(?i)(already approved|APPROVED)"
+    - name: mentions_bdo_or_payment
+      must_match: "(?i)(block|office|disbursement|payment|bank)"
+    - name: no_withdrawal_offered
+      must_not_match: "(?i)(withdraw|cancel.*approved)"
+  judge:
+    - "Assistant explains the difference between application approval and pension disbursement."
+    - "Does not offer to withdraw or change the APPROVED row."
+
+non_interference: true

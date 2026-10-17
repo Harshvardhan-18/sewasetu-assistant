@@ -1,0 +1,67 @@
+id: C14
+role: citizen
+name: Hari Narayan Deka
+age: 90
+village: Rajapara Gaon
+block: Rajapara
+mobile: "9990000014"
+
+why_this_person: |
+  Input normalisation test (finding 7). Hari types in ALL CAPS with typos.
+  DOB in British format "15-8-1936". Account number with spaces and hyphens:
+  "5521 8890-1234 55". IFSC in lowercase "sbin0003077". Tests that the
+  assistant strips whitespace/hyphens from account, uppercases IFSC, parses
+  the non-ISO date format, and stores all values in normalised form. No field
+  should be silently modified beyond normalisation.
+
+how_they_talk: |
+  ALL CAPS, many typos, short bursts. Grandson reads answers to him. Slow.
+  Example lines:
+  - "PENSION CHAHIYE. NAAM HARI NARAYAN DEKA."
+  - "DOB 15-8-1936"
+  - "ACCOUNT 5521 8890-1234 55, IFSC sbin0003077"
+  - "DOC LINK: https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c14_hari_aadhar.jpg"
+
+goal: "PENSION KE LIYE APPLY KARNA HAI."
+
+private_facts:
+  dob: "15/08/1936"
+  dob_raw: "15-8-1936"
+  gender: Male
+  marital_status: Married
+  village: Rajapara Gaon
+  block: Rajapara
+  bank_account_raw: "5521 8890-1234 55"
+  bank_account_normalised: "55218890123455"
+  ifsc_raw: "sbin0003077"
+  ifsc_normalised: "SBIN0003077"
+  doc_url: "https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c14_hari_aadhar.jpg"
+  document_available: true
+
+files:
+  c14_hari_aadhar.jpg: evals/assets/c14_hari_aadhar.jpg
+
+fixtures: []
+
+turn_budget: 12
+max_citizen_messages: 14
+
+must_be_true:
+  db:
+    - name: pending_row_with_normalised_data
+      sql: >
+        SELECT COUNT(*) AS cnt FROM applications
+        WHERE mobile = %(mobile)s
+        AND status = 'PENDING'
+        AND dob = '1936-08-15'
+        AND bank_account = '55218890123455'
+        AND ifsc = 'SBIN0003077'
+      expect: {cnt: 1}
+  transcript:
+    - name: normalisation_confirmed
+      must_match: "(?i)(SBIN0003077|55218890123455|1936)"
+  judge:
+    - "Account number and IFSC were normalised (spaces/hyphens removed, uppercased) and confirmed with the citizen."
+    - "DOB parsed correctly from non-ISO format."
+
+non_interference: true

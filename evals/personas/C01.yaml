@@ -1,0 +1,97 @@
+id: C01
+role: citizen
+name: Kamala Devi Das
+age: 71
+village: Kathoni
+block: Dhemaji Pathar
+mobile: "9990000001"
+
+why_this_person: |
+  Happy-path baseline for the citizen MCP. Tests the complete successful flow:
+  widow applying alone, optional husband name, document provided via HTTPS link,
+  and the "visible in both channels" requirement (web status page and admin list
+  must both show the application). Confirms the full SUBMIT audit trail
+  (actor applicant:<mobile>) and that the SMS gateway confirms receipt.
+
+how_they_talk: |
+  Romanised Hindi-Assamese mix. Short, polite sentences. Addresses the assistant
+  as "beta" (son). Gives information one piece at a time when asked; waits
+  patiently. Example lines:
+  - "Beta, pension ke liye apply karna hai."
+  - "DOB meri 3 March 1955 hai."
+  - "Bank account number 98765432101234 hai, SBIN0003077."
+  - "Proof ka photo link deti hoon: https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c01_kamala_aadhar.jpg"
+
+goal: "Apply for the old-age pension on my own."
+
+private_facts:
+  dob: "03/03/1955"
+  gender: Female
+  marital_status: Widow
+  husband_name: Rameshwar Das
+  village: Kathoni
+  block: Dhemaji Pathar
+  bank_account: "98765432101234"
+  ifsc: "SBIN0003077"
+  doc_url: "https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c01_kamala_aadhar.jpg"
+  document_available: true
+
+files:
+  c01_kamala_aadhar.jpg: evals/assets/c01_kamala_aadhar.jpg
+
+fixtures: []  # no pre-existing state needed
+
+turn_budget: 12
+max_citizen_messages: 15
+
+must_be_true:
+  db:
+    - name: exactly_one_pending_row
+      sql: "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = %(mobile)s AND status = 'PENDING'"
+      expect: {cnt: 1}
+    - name: row_details_correct
+      sql: >
+        SELECT applicant_name, dob, block, ifsc, bank_account, doc_path
+        FROM applications WHERE mobile = %(mobile)s AND status = 'PENDING'
+      expect_row:
+        applicant_name: "Kamala Devi Das"
+        dob: "1955-03-03"
+        block: "Dhemaji Pathar"
+        ifsc: "SBIN0003077"
+        bank_account: "98765432101234"
+    - name: doc_path_nonempty
+      sql: "SELECT doc_path FROM applications WHERE mobile = %(mobile)s AND status = 'PENDING'"
+      expect_row:
+        doc_path__nonempty: true
+    - name: submit_audit_row
+      sql: >
+        SELECT COUNT(*) AS cnt FROM audit_log al
+        JOIN applications a ON al.application_id = a.id
+        WHERE a.mobile = %(mobile)s AND al.action = 'SUBMIT'
+        AND al.actor = 'applicant:' || %(mobile)s
+      expect: {cnt: 1}
+  tool_calls:
+    - name: get_scheme_info_called
+      tool: get_scheme_info
+      check: called
+    - name: submit_application_called
+      tool: submit_application
+      check: called
+  web:
+    - name: visible_on_status_portal
+      as: citizen
+      check: status_page_shows_application_for_mobile
+    - name: visible_in_admin_list
+      as: admin
+      check: admin_list_shows_mobile
+  transcript:
+    - name: no_hallucinated_amount
+      must_not_match: "Rs\\.?\\s*1[,.]?000"
+    - name: mentions_receipt
+      must_match: "(?i)(received|application number|submitted)"
+  judge:
+    - "Reply is in Hindi or Assamese mix, not formal English jargon."
+    - "Assistant confirmed the application number with the citizen before ending."
+    - "Total tool calls <= 12."
+
+non_interference: true

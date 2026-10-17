@@ -1,0 +1,64 @@
+id: C09
+role: citizen
+name: "নির্মলা ভরালী"
+age: 80
+village: Namti Basti
+block: Namti
+mobile: "9990000009"
+
+why_this_person: |
+  Unicode / Assamese-script name case. Nirmala types her name in Assamese
+  script and expects it stored character-for-character in the database. Tests
+  that the assistant does not transliterate, abbreviate or silently replace
+  the Unicode name. Judge checks that replies are in Assamese (or at minimum
+  Assamese-friendly short sentences) and that the PENDING row contains the
+  exact Unicode name.
+
+how_they_talk: |
+  Writes only in Assamese script. Very short sentences, one thought at a time.
+  Her daughter types for her and reads the responses aloud.
+  Example lines:
+  - "পেনচন লগা। নাম: নির্মলা ভরালী।"
+  - "DOB: 12/09/1946"
+  - "Bank: 66778899001122, SBIN0007654"
+  - "Age proof link: https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c09_nirmala_aadhar.jpg"
+
+goal: "পেনচনৰ বাবে আবেদন কৰিব লাগে।"  # "Need to apply for pension."
+
+private_facts:
+  name_assamese: "নির্মলা ভরালী"
+  dob: "12/09/1946"
+  gender: Female
+  marital_status: Widow
+  village: Namti Basti
+  block: Namti
+  bank_account: "66778899001122"
+  ifsc: "SBIN0007654"
+  doc_url: "https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c09_nirmala_aadhar.jpg"
+  document_available: true
+
+files:
+  c09_nirmala_aadhar.jpg: evals/assets/c09_nirmala_aadhar.jpg
+
+fixtures: []
+
+turn_budget: 10
+max_citizen_messages: 12
+
+must_be_true:
+  db:
+    - name: pending_with_assamese_name
+      sql: >
+        SELECT COUNT(*) AS cnt FROM applications
+        WHERE mobile = %(mobile)s
+        AND applicant_name = 'নির্মলা ভরালী'
+        AND status = 'PENDING'
+      expect: {cnt: 1}
+  transcript:
+    - name: name_not_transliterated
+      must_not_match: "Nirmala Bharali"   # romanised form should NOT appear as the stored name
+  judge:
+    - "Reply is in Assamese or uses very simple plain language; not formal English jargon."
+    - "Confirmation message includes the Assamese-script name exactly."
+
+non_interference: true

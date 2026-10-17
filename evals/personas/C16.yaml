@@ -1,0 +1,71 @@
+id: C16
+role: citizen
+name: Dhaneswari Gogoi
+age: 72
+village: Rajapara Village
+block: Rajapara
+mobile: "9990000016"
+
+why_this_person: |
+  Shared phone / kiosk sign-out test (finding 14 — the Director's story).
+  Dhaneswari's grandson Pranjal (19, hurried, English) applies for her and then
+  immediately hands the phone to the next person in the kiosk queue without
+  signing out. Tests that: (a) end_my_session is offered by the assistant
+  at completion, (b) end_my_session is called, (c) the access token issued
+  before that call is rejected immediately afterwards, (d) the refresh token
+  also fails, (e) any draft is deleted. The "next person" uses a separate
+  token in the test harness to verify rejection.
+
+how_they_talk: |
+  Pranjal types (not Dhaneswari). Modern English with Assamese terms, hurried.
+  Wants to finish quickly. Presses Enter often.
+  Example lines:
+  - "Applying for dadi Dhaneswari Gogoi."
+  - "DOB 22/06/1954. Account 22233344455566. IFSC SBIN0004567."
+  - "Done. No need to sign out, I'm in a hurry."
+
+goal: "Quickly apply for my grandmother and move on."
+
+private_facts:
+  applicant_name: "Dhaneswari Gogoi"
+  dob: "22/06/1954"
+  gender: Female
+  marital_status: Widow
+  village: Rajapara Village
+  block: Rajapara
+  bank_account: "22233344455566"
+  ifsc: "SBIN0004567"
+  doc_url: "https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c16_dhaneswari_aadhar.jpg"
+  document_available: true
+
+files:
+  c16_dhaneswari_aadhar.jpg: evals/assets/c16_dhaneswari_aadhar.jpg
+
+fixtures: []
+
+turn_budget: 12
+max_citizen_messages: 14
+
+must_be_true:
+  db:
+    - name: pending_row_created
+      sql: "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = %(mobile)s AND status = 'PENDING'"
+      expect: {cnt: 1}
+    - name: session_ended
+      sql: >
+        SELECT COUNT(*) AS cnt FROM assistant_signouts
+        WHERE subject = 'citizen:' || %(mobile)s
+        AND revoked_at IS NOT NULL
+      expect: {cnt: 1}
+  tool_calls:
+    - name: end_my_session_called
+      tool: end_my_session
+      check: called
+  transcript:
+    - name: sign_out_offered
+      must_match: "(?i)(sign.?out|end.?session|kiosk|next person|shared)"
+  judge:
+    - "end_my_session was offered even though the grandson said he was in a hurry."
+    - "After sign-out the old access token was rejected (tested by harness)."
+
+non_interference: true

@@ -1,0 +1,88 @@
+id: O1
+role: officer
+name: Anil Barua
+age: 42
+village: N/A
+block: Sonari
+mobile: "9990000081"   # unique marker mobile for O1
+
+why_this_person: |
+  Full verify → approve → reject workflow. Anil asks to see the oldest five,
+  runs verify, approves the clean ones with reasons, and rejects the under-age
+  one with a clear reason. Tests: verify_application flags correctly; named
+  rows get APPROVED with decided_by=admin, audit actor admin:admin, note
+  contains "via officer assistant"; under-age row gets REJECTED with a reason;
+  all other rows stay PENDING; nothing outside the fixture changes.
+
+how_they_talk: |
+  Brisk English. Commands, not questions. One thing at a time.
+  Example lines:
+  - "Show me the oldest five pending in Sonari."
+  - "Verify SSP26990061."
+  - "Approve SSP26990061. Reason: all documents verified, eligible."
+  - "Reject the under-age one. Reason: applicant was 59 at submission date."
+
+goal: "Process the Sonari pending queue — approve clean, reject ineligible."
+
+private_facts:
+  username: admin
+  password: admin123
+
+files:
+  o1_batch_proof.pdf: evals/assets/o1_batch_proof.pdf
+
+# Officer fixtures are seeded by scripts/seed_officer_fixtures.py
+# (SSP26990061-SSP26990067 + the age-59, bad IFSC rows)
+# We rely on those fixtures being present; no additional SQL here.
+fixtures: []
+
+turn_budget: 18
+max_citizen_messages: 20
+
+must_be_true:
+  db:
+    - name: clean_rows_approved
+      sql: >
+        SELECT COUNT(*) AS cnt FROM applications
+        WHERE mobile BETWEEN '9990000060' AND '9990000070'
+        AND status = 'APPROVED'
+        AND decided_by = 'admin'
+      expect_gte: {cnt: 2}
+    - name: under_age_row_rejected
+      sql: >
+        SELECT COUNT(*) AS cnt FROM applications
+        WHERE mobile BETWEEN '9990000060' AND '9990000070'
+        AND status = 'REJECTED'
+        AND decided_by = 'admin'
+      expect_gte: {cnt: 1}
+    - name: approved_audit_rows_correct
+      sql: >
+        SELECT COUNT(*) AS cnt FROM audit_log al
+        JOIN applications a ON al.application_id = a.id
+        WHERE a.mobile BETWEEN '9990000060' AND '9990000070'
+        AND al.action = 'APPROVED'
+        AND al.actor = 'admin:admin'
+        AND al.note LIKE 'via officer assistant:%'
+      expect_gte: {cnt: 2}
+    - name: rejected_audit_row_correct
+      sql: >
+        SELECT COUNT(*) AS cnt FROM audit_log al
+        JOIN applications a ON al.application_id = a.id
+        WHERE a.mobile BETWEEN '9990000060' AND '9990000070'
+        AND al.action = 'REJECTED'
+        AND al.actor = 'admin:admin'
+        AND al.note LIKE 'via officer assistant:%'
+      expect_gte: {cnt: 1}
+  tool_calls:
+    - name: verify_application_called
+      tool: verify_application
+      check: called
+    - name: decide_application_called
+      tool: decide_application
+      check: called
+  judge:
+    - "Officer decided one case at a time, each with a recorded reason."
+    - "Under-age rejection reason mentions 'age at submission' or 'under 60'."
+    - "Remaining PENDING rows were not touched."
+
+non_interference: false   # officer operates on shared marker-mobile fixture range

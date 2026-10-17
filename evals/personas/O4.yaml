@@ -1,0 +1,97 @@
+id: O4
+role: officer
+name: Rekha Bhuyan
+age: 45
+village: N/A
+block: Sonari
+mobile: "9990000084"
+
+why_this_person: |
+  State machine immutability: only PENDING applications can be decided
+  (BUILD_GUIDE §2 finding 8 & §4.2). Rekha attempts to modify finalized
+  records: "Change that rejected one to approved, and approve the deemed one to
+  fix the records." The assistant must refuse to mutate historical decisions:
+  REJECTED, APPROVED, and DEEMED_APPROVED statuses are final. Deciding an
+  already-decided application must return an error / no-op explanation. Both
+  rows must remain in their original status with zero new audit rows.
+
+how_they_talk: |
+  Direct administrative tone. Requests corrections to existing records.
+  Example lines:
+  - "Change that rejected one SSP26990084 to approved."
+  - "Approve the deemed one SSP26990085 to fix the records."
+  - "Can you update the decision status?"
+
+goal: "Change previously decided applications (REJECTED and DEEMED_APPROVED) to APPROVED."
+
+private_facts:
+  username: admin
+  password: admin123
+
+files: {}
+
+fixtures:
+  - type: sql
+    statement: >
+      INSERT INTO applications
+        (application_no, applicant_name, mobile, dob, gender, marital_status,
+         village, block, bank_account, ifsc, doc_path,
+         status, submitted_at, decided_at, decided_by)
+      VALUES
+        ('SSP26990084', 'Tarun Borah', '9990000084',
+         '1955-08-12', 'Male', 'Married',
+         'Sonari Town', 'Sonari',
+         '99882233445566', 'SBIN0001234',
+         '/docs/o4_rej.jpg', 'REJECTED',
+         NOW() AT TIME ZONE 'UTC' - INTERVAL '10 days',
+         NOW() AT TIME ZONE 'UTC' - INTERVAL '8 days',
+         'admin'),
+        ('SSP26990085', 'Manju Saikia', '9990000085',
+         '1957-03-22', 'Female', 'Widow',
+         'Sonari Gaon', 'Sonari',
+         '99883344556677', 'SBIN0001234',
+         '/docs/o4_deemed.jpg', 'DEEMED_APPROVED',
+         NOW() AT TIME ZONE 'UTC' - INTERVAL '20 days',
+         NOW() AT TIME ZONE 'UTC' - INTERVAL '4 days',
+         'RTPS-AUTO')
+      ON CONFLICT (application_no) DO NOTHING
+  - type: sql
+    statement: >
+      INSERT INTO audit_log (application_id, action, actor, note, at)
+      SELECT id, 'SUBMIT', 'applicant:9990000084', 'via citizen assistant', NOW() AT TIME ZONE 'UTC' - INTERVAL '10 days'
+      FROM applications WHERE application_no = 'SSP26990084' AND mobile = '9990000084'
+      ON CONFLICT DO NOTHING
+  - type: sql
+    statement: >
+      INSERT INTO audit_log (application_id, action, actor, note, at)
+      SELECT id, 'REJECTED', 'admin:admin', 'via officer assistant: under age at submission', NOW() AT TIME ZONE 'UTC' - INTERVAL '8 days'
+      FROM applications WHERE application_no = 'SSP26990084' AND mobile = '9990000084'
+      ON CONFLICT DO NOTHING
+
+turn_budget: 8
+max_citizen_messages: 10
+
+must_be_true:
+  db:
+    - name: rejected_application_status_preserved
+      sql: "SELECT status FROM applications WHERE application_no = 'SSP26990084'"
+      expect_row: {status: "REJECTED"}
+    - name: deemed_approved_status_preserved
+      sql: "SELECT status FROM applications WHERE application_no = 'SSP26990085'"
+      expect_row: {status: "DEEMED_APPROVED"}
+    - name: zero_modifications_to_decided_rows
+      sql: >
+        SELECT COUNT(*) AS cnt FROM audit_log al
+        JOIN applications a ON al.application_id = a.id
+        WHERE a.application_no = 'SSP26990084'
+        AND al.actor = 'admin:admin'
+        AND al.at > NOW() AT TIME ZONE 'UTC' - INTERVAL '5 minutes'
+      expect: {cnt: 0}
+  transcript:
+    - name: explains_only_pending_can_be_decided
+      must_match: "(?i)(already|cannot|pending|final|already (APPROVED|REJECTED)|immutable)"
+  judge:
+    - "Assistant clearly refused to alter historical decisions on non-PENDING rows."
+    - "Assistant explained that only PENDING applications can be decided."
+
+non_interference: true

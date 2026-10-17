@@ -1,0 +1,91 @@
+id: C10
+role: citizen
+name: Hemen Kalita
+age: 65
+village: Borgaon Tiniali
+block: Borgaon
+mobile: "9990000010"
+
+why_this_person: |
+  REJECTED does not block re-application (finding 8). Hemen was rejected 5 days
+  ago. He is angry and wants to try again with a clearer proof. Tests that
+  the assistant correctly identifies the REJECTED status, allows re-application,
+  and ends with 2 rows (REJECTED + new PENDING). Exactly one active row at end.
+
+how_they_talk: |
+  Annoyed, direct. Assamese-English fragments. Does not want explanations,
+  just wants to apply again.
+  Example lines:
+  - "Last week they rejected. Now I have clear photo. Apply again."
+  - "Why was I rejected? I want to apply."
+  - "DOB 5 January 1961. Same account. New proof."
+
+goal: "Re-apply after rejection with a better age proof document."
+
+private_facts:
+  dob: "05/01/1961"
+  gender: Male
+  marital_status: Married
+  village: Borgaon Tiniali
+  block: Borgaon
+  bank_account: "77889900112233"
+  ifsc: "SBIN0009876"
+  doc_url: "https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c10_hemen_aadhar.jpg"
+  document_available: true
+
+files:
+  c10_hemen_aadhar.jpg: evals/assets/c10_hemen_aadhar.jpg
+
+fixtures:
+  - type: sql
+    statement: >
+      INSERT INTO applications
+        (application_no, applicant_name, mobile, dob, gender, marital_status,
+         village, block, bank_account, ifsc, doc_path,
+         status, submitted_at, decided_at, decided_by)
+      VALUES
+        ('SSP26990010', 'Hemen Kalita', '9990000010',
+         '1961-01-05', 'Male', 'Married',
+         'Borgaon Tiniali', 'Borgaon',
+         '77889900112233', 'SBIN0009876',
+         '/docs/c10_proof_old.jpg', 'REJECTED',
+         NOW() AT TIME ZONE 'UTC' - INTERVAL '5 days',
+         NOW() AT TIME ZONE 'UTC' - INTERVAL '4 days',
+         'admin')
+      ON CONFLICT DO NOTHING
+  - type: sql
+    statement: >
+      INSERT INTO audit_log (application_id, action, actor, note, at)
+      SELECT id, 'SUBMIT', 'applicant:9990000010', 'via citizen assistant', NOW() AT TIME ZONE 'UTC' - INTERVAL '5 days'
+      FROM applications WHERE application_no = 'SSP26990010' AND mobile = '9990000010'
+  - type: sql
+    statement: >
+      INSERT INTO audit_log (application_id, action, actor, note, at)
+      SELECT id, 'REJECTED', 'admin:admin', 'via officer assistant: age proof not legible', NOW() AT TIME ZONE 'UTC' - INTERVAL '4 days'
+      FROM applications WHERE application_no = 'SSP26990010' AND mobile = '9990000010'
+
+turn_budget: 12
+max_citizen_messages: 14
+
+must_be_true:
+  db:
+    - name: old_row_still_rejected
+      sql: "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = %(mobile)s AND status = 'REJECTED'"
+      expect: {cnt: 1}
+    - name: new_pending_row
+      sql: "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = %(mobile)s AND status = 'PENDING'"
+      expect: {cnt: 1}
+    - name: exactly_one_active
+      sql: >
+        SELECT COUNT(*) AS cnt FROM applications
+        WHERE mobile = %(mobile)s
+        AND status IN ('PENDING','APPROVED','DEEMED_APPROVED')
+      expect: {cnt: 1}
+  transcript:
+    - name: mentions_rejection_reason
+      must_match: "(?i)(rejected|age proof|legible|previous)"
+  judge:
+    - "Assistant shows the rejection reason from the old application before re-applying."
+    - "New application includes the new document link."
+
+non_interference: true

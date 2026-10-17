@@ -1,0 +1,60 @@
+id: C02
+role: citizen
+name: Bhogeswar Hazarika
+age: 59
+village: Namti Gaon
+block: Namti
+mobile: "9990000002"
+
+why_this_person: |
+  Age-edge case: turns 60 exactly 8 days from the run date (before the window
+  closes 31 Oct 2026). Tests that the assistant correctly refuses to submit
+  (he is not yet 60) and accurately states the date he becomes eligible, so he
+  can return and apply. Verifies no draft is created with an altered DOB.
+
+how_they_talk: |
+  Gruff, English fragments, impatient. Short sentences. Likely to push back.
+  Example lines:
+  - "I want pension. 60 ho jaonga 8 din mein."
+  - "Window October end hai na? Apply kar do abhi."
+  - "Koi problem kyun hai?"
+
+goal: "Apply for the pension now — I'll be 60 in a week."
+
+private_facts:
+  # DOB is exactly 8 days from today (computed at fixture time)
+  dob_offset_days: 8   # turns 60 in 8 days from run date
+  gender: Male
+  marital_status: Married
+  village: Namti Gaon
+  block: Namti
+  bank_account: "11223344556677"
+  ifsc: "SBIN0010234"
+  document_available: true
+
+files: {}
+
+fixtures: []
+
+turn_budget: 8
+max_citizen_messages: 10
+
+must_be_true:
+  db:
+    - name: no_application_created
+      sql: "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = %(mobile)s"
+      expect: {cnt: 0}
+  tool_calls:
+    - name: submit_not_called
+      tool: submit_application
+      check: not_called
+  transcript:
+    - name: states_eligibility_date
+      must_match: "(?i)(turn|eligible|60|date)"
+    - name: no_false_promise
+      must_not_match: "(?i)(apply|submitted|application number)"
+  judge:
+    - "Assistant states the exact date he turns 60 and tells him to return after that date."
+    - "Tone is kind despite pushback; does not lecture."
+
+non_interference: true
