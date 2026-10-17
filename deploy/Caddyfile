@@ -28,8 +28,16 @@
 		reverse_proxy mcp-officer:8080
 	}
 
-	# ── Eval dashboard ──────────────────────────────────────────────
+	# ── Eval dashboard & healthz ────────────────────────────────────
 	handle /eval-dashboard* {
+		reverse_proxy eval-dashboard:8080
+	}
+
+	handle /healthz {
+		reverse_proxy eval-dashboard:8080
+	}
+
+	handle /api/runs {
 		reverse_proxy eval-dashboard:8080
 	}
 

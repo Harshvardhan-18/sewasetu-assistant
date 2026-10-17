@@ -359,15 +359,27 @@ def run_all_security_checks() -> bool:
     ]
 
     all_passed = True
+    results_list = []
     for test_id, name, func in checks:
         try:
             passed, detail = func()
             log_check(test_id, name, passed, detail)
+            results_list.append({"id": test_id, "name": name, "passed": passed, "detail": detail})
             if not passed:
                 all_passed = False
         except Exception as e:
             log_check(test_id, name, False, f"Exception: {e}")
+            results_list.append({"id": test_id, "name": name, "passed": False, "detail": f"Exception: {e}"})
             all_passed = False
+
+    # Persist results to evals/runs/security_results.json
+    try:
+        runs_dir = os.path.join(os.path.dirname(__file__), "runs")
+        os.makedirs(runs_dir, exist_ok=True)
+        with open(os.path.join(runs_dir, "security_results.json"), "w", encoding="utf-8") as f:
+            json.dump({"timestamp": os.environ.get("TIMESTAMP", "2026-10-17T12:00:00Z"), "all_passed": all_passed, "checks": results_list}, f, indent=2)
+    except Exception as e:
+        print(f"Notice: Failed to save security_results.json: {e}")
 
     print("\n--------------------------------------------------------")
     if all_passed:

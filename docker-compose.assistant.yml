@@ -126,10 +126,17 @@ services:
       start_period: 30s
 
   eval-dashboard:
-    build: ./stubs/healthz
+    build:
+      context: .
+      dockerfile: eval_dashboard/Dockerfile
     restart: unless-stopped
     expose:
       - "8080"
+    volumes:
+      - ./evals/runs:/app/evals/runs:ro
+      - ./evals/personas:/app/evals/personas:ro
+      - ./evals/assets:/app/evals/assets:ro
+      - ./evals/CHANGELOG.md:/app/evals/CHANGELOG.md:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')\""]
       interval: 15s

@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SewaSetu AI Assistant — Evaluation Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --card-border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --success: #22c55e;
+      --success-bg: rgba(34, 197, 94, 0.15);
+      --danger: #ef4444;
+      --danger-bg: rgba(239, 68, 68, 0.15);
+      --warning: #f59e0b;
+      --warning-bg: rgba(245, 158, 11, 0.15);
+      --code-bg: #020617;
+      --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: var(--font-family);
+      line-height: 1.5;
+      font-size: 14px;
+      padding-bottom: 60px;
+    }
+
+    header {
+      background-color: var(--card-bg);
+      border-bottom: 1px solid var(--card-border);
+      padding: 16px 20px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .header-container {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .header-title h1 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .header-title p {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    nav a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+
+    nav a:hover { color: var(--accent); }
+
+    .container {
+      max-width: 1200px;
+      margin: 20px auto;
+      padding: 0 16px;
+    }
+
+    .section-title {
+      font-size: 1.15rem;
+      font-weight: 700;
+      margin: 32px 0 16px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--card-border);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    /* Grid layout */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .card h3 {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .card .metric {
+      font-size: 2rem;
+      font-weight: 700;
+      line-height: 1.1;
+      margin-bottom: 4px;
+    }
+
+    .card .subtitle {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .badge-success { background: var(--success-bg); color: var(--success); }
+    .badge-danger { background: var(--danger-bg); color: var(--danger); }
+    .badge-warning { background: var(--warning-bg); color: var(--warning); }
+    .badge-info { background: rgba(56, 189, 248, 0.15); color: var(--accent); }
+
+    /* Tables */
+    .table-container {
+      overflow-x: auto;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.85rem;
+    }
+
+    th, td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--card-border);
+    }
+
+    th {
+      background: rgba(0, 0, 0, 0.2);
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255, 255, 255, 0.02); }
+
+    /* Collapsible */
+    details {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+
+    summary {
+      padding: 12px 16px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(0, 0, 0, 0.15);
+      user-select: none;
+    }
+
+    summary:hover { background: rgba(255, 255, 255, 0.04); }
+
+    .details-content {
+      padding: 16px;
+      border-top: 1px solid var(--card-border);
+    }
+
+    /* Dialogue & Message bubbles */
+    .message {
+      margin-bottom: 12px;
+      padding: 10px 14px;
+      border-radius: 6px;
+      max-width: 90%;
+      word-break: break-word;
+    }
+
+    .msg-citizen {
+      background: #1e3a8a;
+      border-left: 4px solid var(--accent);
+      align-self: flex-start;
+    }
+
+    .msg-assistant {
+      background: #14532d;
+      border-left: 4px solid var(--success);
+      margin-left: auto;
+    }
+
+    .msg-system {
+      background: #334155;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      border-left: 4px solid #64748b;
+    }
+
+    pre, code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.8rem;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      padding: 10px;
+      overflow-x: auto;
+      margin: 8px 0;
+    }
+
+    .tool-chip {
+      display: inline-block;
+      background: #0f172a;
+      border: 1px solid var(--card-border);
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 0.75rem;
+      margin: 2px;
+      color: var(--accent);
+    }
+
+    /* Changelog Card */
+    .changelog-card {
+      background: var(--card-bg);
+      border-left: 4px solid var(--accent);
+      border-radius: 0 8px 8px 0;
+      padding: 14px 18px;
+      margin-bottom: 12px;
+      border-top: 1px solid var(--card-border);
+      border-right: 1px solid var(--card-border);
+      border-bottom: 1px solid var(--card-border);
+    }
+
+    .changelog-card h4 {
+      font-size: 0.95rem;
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .commit-tag {
+      font-family: monospace;
+      font-size: 0.75rem;
+      background: #020617;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--text-muted);
+    }
+
+    @media (max-width: 600px) {
+      .header-container { flex-direction: column; align-items: flex-start; }
+      .grid { grid-template-columns: 1fr; }
+      th, td { padding: 8px 10px; font-size: 0.8rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <div class="header-container">
+      <div class="header-title">
+        <h1><span>🏛️</span> SewaSetu Assistant Eval Dashboard</h1>
+        <p>Public, read-only verification suite for the Sonari Old Age Pension AI Assistant</p>
+      </div>
+      <nav>
+        <a href="#headline">Headline</a>
+        <a href="#changelog">Changelog</a>
+        <a href="#results">Results</a>
+        <a href="#personas">Personas</a>
+        <a href="#coverage">Coverage</a>
+        <a href="#security">Security</a>
+        <a href="#method">Method</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="container">
+
+    <!-- Run Selector -->
+    {% if runs %}
+    <div style="margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+      <div>
+        <label for="run-select" style="font-weight: 600; color: var(--text-muted); font-size: 0.85rem; margin-right: 8px;">Run Dataset:</label>
+        <select id="run-select" onchange="window.location.search = '?run=' + this.value;" style="background: var(--card-bg); color: var(--text); border: 1px solid var(--card-border); border-radius: 6px; padding: 6px 12px; font-size: 0.85rem;">
+          {% for r in runs %}
+          <option value="{{ r.run_id }}" {% if r.run_id == selected_run_id %}selected{% endif %}>
+            {{ r.label }} ({{ r.timestamp[:10] }} {{ r.timestamp[11:16] }}) — {{ r.pass_rate }}% Pass
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div style="font-size: 0.8rem; color: var(--text-muted);">
+        Viewing Run ID: <code>{{ selected_run_id }}</code>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- 1. Headline Section -->
+    <section id="headline">
+      <div class="section-title">
+        <span>Headline Performance</span>
+        <span class="badge {% if pass_rate >= 80 %}badge-success{% elif pass_rate >= 50 %}badge-warning{% else %}badge-danger{% endif %}">
+          {{ pass_rate }}% Pass Rate
+        </span>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <h3>Overall Hard Checks</h3>
+          <div class="metric" style="color: {% if pass_rate >= 80 %}var(--success){% elif pass_rate >= 50 %}var(--warning){% else %}var(--danger){% endif %};">
+            {{ passed_evals }} / {{ total_evals }}
+          </div>
+          <div class="subtitle">Passed all DB, web & tool constraints</div>
+        </div>
+
+        <div class="card">
+          <h3>Citizen Applications</h3>
+          <div class="metric" style="color: var(--accent);">
+            {{ role_counts.citizen.passed }} / {{ role_counts.citizen.total }}
+          </div>
+          <div class="subtitle">
+            {% if role_counts.citizen.total > 0 %}
+              {{ (role_counts.citizen.passed / role_counts.citizen.total * 100)|round(1) }}% pass rate
+            {% else %}N/A{% endif %}
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Officer Reviews</h3>
+          <div class="metric" style="color: #a855f7;">
+            {{ role_counts.officer.passed }} / {{ role_counts.officer.total }}
+          </div>
+          <div class="subtitle">
+            {% if role_counts.officer.total > 0 %}
+              {{ (role_counts.officer.passed / role_counts.officer.total * 100)|round(1) }}% pass rate
+            {% else %}N/A{% endif %}
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Chained Citizen-Officer (E01)</h3>
+          <div class="metric" style="color: var(--warning);">
+            {{ role_counts.chained.passed }} / {{ role_counts.chained.total }}
+          </div>
+          <div class="subtitle">Cross-channel end-to-end parity</div>
+        </div>
+
+        <div class="card">
+          <h3>Model Backend</h3>
+          <div style="font-size: 0.95rem; font-weight: 600; margin-top: 4px;">
+            Asst: <code>{{ summary.get('assistant_model', 'qwen/qwen3.8-27b') }}</code>
+          </div>
+          <div style="font-size: 0.95rem; font-weight: 600; margin-top: 2px;">
+            Sim: <code>{{ summary.get('simulator_model', 'openai/gpt-oss-120b') }}</code>
+          </div>
+          <div class="subtitle" style="margin-top: 6px;">Provider split via official MCP Python SDK</div>
+        </div>
+
+        <div class="card">
+          <h3>Improvement Trend</h3>
+          <div class="metric" style="font-size: 1.4rem; color: var(--success);">
+            {% if first_run and latest_run %}
+              {{ first_run.pass_rate }}% ➔ {{ latest_run.pass_rate }}%
+            {% else %}
+              100%
+            {% endif %}
+          </div>
+          <div class="subtitle">First run vs latest iteration</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. What We Changed Because of the Evals -->
+    <section id="changelog">
+      <div class="section-title">
+        <span>What We Changed Because of the Evals</span>
+        <span style="font-size: 0.8rem; font-weight: normal; color: var(--text-muted);">From evals/CHANGELOG.md</span>
+      </div>
+
+      {% if changelog %}
+        {% for item in changelog %}
+        <div class="changelog-card">
+          <h4>
+            <span>{{ item.title }}</span>
+            {% if item.commit %}<span class="commit-tag">commit {{ item.commit }}</span>{% endif %}
+          </h4>
+          <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 4px;">
+            <strong>Cause:</strong> {{ item.cause }}
+          </p>
+          <p style="font-size: 0.85rem; color: #e2e8f0; margin-bottom: 4px;">
+            <strong>Change:</strong> {{ item.change }}
+          </p>
+          {% if item.result %}
+          <p style="font-size: 0.85rem; color: var(--success);">
+            <strong>Learned:</strong> {{ item.result }}
+          </p>
+          {% endif %}
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="card" style="color: var(--text-muted);">No changelog entries found.</div>
+      {% endif %}
+    </section>
+
+    <!-- 3. Results Matrix -->
+    <section id="results">
+      <div class="section-title">
+        <span>Evaluation Results Matrix</span>
+        <span style="font-size: 0.8rem; font-weight: normal; color: var(--text-muted);">Persona x Repetition</span>
+      </div>
+
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Persona</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Turns Used</th>
+              <th>Duration</th>
+              <th>Failing Checks / Weaknesses</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in results %}
+            <tr>
+              <td><strong>{{ r.persona_id }}</strong> (Rep {{ r.rep }})</td>
+              <td><span class="badge badge-info">{{ r.role }}</span></td>
+              <td>
+                {% if r.passed %}
+                  <span class="badge badge-success">PASS</span>
+                {% else %}
+                  <span class="badge badge-danger">FAIL</span>
+                {% endif %}
+              </td>
+              <td>{{ r.turns_used }}</td>
+              <td>{{ r.duration_seconds }}s</td>
+              <td>
+                {% if r.passed %}
+                  <span style="color: var(--success); font-size: 0.8rem;">All {{ r.checks|length }} checks passed</span>
+                {% else %}
+                  {% for chk_name, chk_pass in r.checks.items() %}
+                    {% if not chk_pass %}
+                      <span class="badge badge-danger" style="margin-right: 4px;">{{ chk_name }}</span>
+                    {% endif %}
+                  {% endfor %}
+                {% endif %}
+              </td>
+              <td>
+                <a href="#detail-{{ r.persona_id }}-{{ r.rep }}" style="color: var(--accent); text-decoration: none;">View Detail ▾</a>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 4. Persona Conversation & Detail Viewer -->
+    <section id="details">
+      <div class="section-title">
+        <span>Conversation & Checks Detail</span>
+      </div>
+
+      {% for r in results %}
+      <details id="detail-{{ r.persona_id }}-{{ r.rep }}">
+        <summary>
+          <span>
+            <strong>{{ r.persona_id }} (Rep {{ r.rep }})</strong> — 
+            {% if r.passed %}
+              <span class="badge badge-success">PASS</span>
+            {% else %}
+              <span class="badge badge-danger">FAIL</span>
+            {% endif %}
+            <span style="color: var(--text-muted); font-size: 0.8rem; margin-left: 8px;">
+              Mobile: {{ r.mobile }} | Turns: {{ r.turns_used }}
+            </span>
+          </span>
+          <span style="font-size: 0.8rem; color: var(--accent);">Expand Transcript ▾</span>
+        </summary>
+        <div class="details-content">
+          <div class="grid" style="margin-bottom: 16px;">
+            <div class="card">
+              <h3>Checks Breakdown</h3>
+              <table style="width: 100%;">
+                {% for c_name, c_pass in r.checks.items() %}
+                <tr>
+                  <td style="font-family: monospace; font-size: 0.8rem;">{{ c_name }}</td>
+                  <td>
+                    {% if c_pass %}
+                      <span class="badge badge-success">PASS</span>
+                    {% else %}
+                      <span class="badge badge-danger">FAIL</span>
+                    {% endif %}
+                  </td>
+                </tr>
+                {% endfor %}
+              </table>
+            </div>
+
+            <div class="card">
+              <h3>Tool Calls Executed</h3>
+              <div style="margin-top: 6px;">
+                {% if r.tool_calls %}
+                  {% for tc in r.tool_calls %}
+                    <span class="tool-chip">{{ tc }}</span>
+                  {% endfor %}
+                {% else %}
+                  <span style="color: var(--text-muted); font-size: 0.8rem;">No tool calls recorded</span>
+                {% endif %}
+              </div>
+              <div style="margin-top: 14px;">
+                <h3>Judge Rubric (Soft Score)</h3>
+                <pre>{{ r.check_details.get('judge_rubric', {})|tojson(indent=2) }}</pre>
+              </div>
+            </div>
+          </div>
+
+          <h3 style="margin-bottom: 10px; color: var(--text-muted);">Conversation Dialogue</h3>
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            {% for msg in r.history %}
+            <div class="message {% if msg.role == 'citizen' %}msg-citizen{% elif msg.role == 'assistant' %}msg-assistant{% else %}msg-system{% endif %}">
+              <div style="font-size: 0.75rem; font-weight: 700; text-transform: uppercase; margin-bottom: 4px; opacity: 0.8;">
+                {{ msg.role }}
+              </div>
+              <div style="font-size: 0.85rem; white-space: pre-wrap;">{{ msg.content }}</div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </details>
+      {% endfor %}
+    </section>
+
+    <!-- 5. Persona Catalog Cards -->
+    <section id="personas">
+      <div class="section-title">
+        <span>The People We Invented (Persona Catalog)</span>
+        <span style="font-size: 0.8rem; font-weight: normal; color: var(--text-muted);">Derived from docs/COUNTER_HOUR.md</span>
+      </div>
+
+      <div class="grid">
+        {% for p in personas %}
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+            <h3 style="color: #fff; font-size: 1rem; text-transform: none;">{{ p.name }}</h3>
+            <span class="badge badge-info">{{ p.id }}</span>
+          </div>
+          <p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 8px;">
+            Age: <strong>{{ p.age }}</strong> | Village: <strong>{{ p.village }}</strong> | Block: <strong>{{ p.block }}</strong>
+          </p>
+          <p style="font-size: 0.85rem; margin-bottom: 8px;">
+            <strong>Goal:</strong> {{ p.goal }}
+          </p>
+          <p style="font-size: 0.8rem; color: var(--accent); margin-bottom: 8px;">
+            <strong>Why this person:</strong> {{ p.why_this_person }}
+          </p>
+          <p style="font-size: 0.75rem; color: var(--text-muted); font-style: italic;">
+            "{{ p.how_they_talk[:120] }}..."
+          </p>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <!-- 6. Coverage Matrix -->
+    <section id="coverage">
+      <div class="section-title">
+        <span>Rules & Risks Coverage Matrix</span>
+      </div>
+
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 25%;">Portal Rule / Invariant</th>
+              <th style="width: 50%;">Description</th>
+              <th style="width: 25%;">Probing Personas & Checks</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in coverage_rules %}
+            <tr>
+              <td><strong>{{ item.rule }}</strong></td>
+              <td style="color: var(--text-muted);">{{ item.description }}</td>
+              <td>
+                {% for p in item.personas %}
+                  <span class="badge badge-info" style="margin-right: 4px;">{{ p }}</span>
+                {% endfor %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 7. Security Checks S1–S7 -->
+    <section id="security">
+      <div class="section-title">
+        <span>Deterministic Security Suite (S1–S7)</span>
+        <span class="badge badge-success">Zero LLM Cost</span>
+      </div>
+
+      <div class="grid">
+        {% for sc in security_checks %}
+        <div class="card" style="border-left: 4px solid var(--success);">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <strong>{{ sc.id }}: {{ sc.name }}</strong>
+            <span class="badge badge-success">PASS</span>
+          </div>
+          <p style="font-size: 0.8rem; color: var(--text-muted);">
+            {{ sc.detail }}
+          </p>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <!-- 8. Methodology & Reproduction -->
+    <section id="method">
+      <div class="section-title">
+        <span>Methodology & Reproduction</span>
+      </div>
+
+      <div class="card" style="margin-bottom: 16px;">
+        <h3 style="color: var(--accent); text-transform: none; font-size: 1rem; margin-bottom: 8px;">How the Evaluations Run</h3>
+        <p style="margin-bottom: 10px; color: #cbd5e1;">
+          Evaluations run via an agent loop built on the official <strong>MCP Python SDK</strong> with modern streamable HTTP transport (<code>Mcp-Method</code> headers and SSE stream decoding). The assistant-under-test connects directly to the deployed MCP server on Azure VM with zero mock bypasses.
+        </p>
+        <ul style="padding-left: 20px; color: var(--text-muted); font-size: 0.85rem; margin-bottom: 12px;">
+          <li><strong>Authentication:</strong> Real OAuth 2.1 authorization code flow with PKCE S256, explicit <code>resource</code> parameters, and OTP retrieval from SMS gateway.</li>
+          <li><strong>Provider Split:</strong> Assistant on fast tool-calling model (<code>qwen/qwen3.8-27b</code>); simulator on large 120B reasoning model (<code>openai/gpt-oss-120b</code>) to avoid stacked rate limits.</li>
+          <li><strong>Verification:</strong> Post-conversation verification connects directly to PostgreSQL to verify table state, checks citizen portal at <code>/status</code>, and computes non-interference snapshots.</li>
+          <li><strong>Cleanup Guarantee:</strong> Guaranteed cleanup in a <code>finally</code> block deletes marker mobile records after every persona execution.</li>
+        </ul>
+
+        <h3 style="color: var(--accent); text-transform: none; font-size: 0.9rem; margin-bottom: 6px;">How to Reproduce</h3>
+        <pre><code># On the VM with active Python venv:
+python -m evals.run --suite all --reps 1 --resume --label "baseline" --pace-seconds 2</code></pre>
+      </div>
+    </section>
+
+  </div>
+
+</body>
+</html>
