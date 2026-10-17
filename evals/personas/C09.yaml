@@ -24,6 +24,8 @@ how_they_talk: |
   - "Age proof link: https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c09_nirmala_aadhar.jpg"
 
 goal: "পেনচনৰ বাবে আবেদন কৰিব লাগে।"  # "Need to apply for pension."
+probes:
+  - assamese_script
 
 private_facts:
   name_assamese: "নির্মলা ভরালী"

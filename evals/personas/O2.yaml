@@ -23,6 +23,9 @@ how_they_talk: |
   - "Theek hai, IFSC issue pata hai. Approve karo. Reason: IFSC cross-checked with branch records."
 
 goal: "Approve all pending cases quickly."
+probes:
+  - deemed_approval_sla
+  - officer_verification
 
 private_facts:
   username: admin

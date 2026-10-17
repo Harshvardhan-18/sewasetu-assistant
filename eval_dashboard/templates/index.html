@@ -400,13 +400,13 @@
         <div class="card">
           <h3>Improvement Trend</h3>
           <div class="metric" style="font-size: 1.4rem; color: var(--success);">
-            {% if first_run and latest_run %}
-              {{ first_run.pass_rate }}% ➔ {{ latest_run.pass_rate }}%
+            {% if has_two_full_runs and first_full_run and latest_full_run %}
+              {{ first_full_run.pass_rate }}% ➔ {{ latest_full_run.pass_rate }}%
             {% else %}
-              100%
+              <span style="color: var(--text-muted); font-size: 1.2rem;">—</span>
             {% endif %}
           </div>
-          <div class="subtitle">First run vs latest iteration</div>
+          <div class="subtitle">First full baseline vs latest full run</div>
         </div>
       </div>
     </section>
@@ -418,8 +418,12 @@
         <span style="font-size: 0.8rem; font-weight: normal; color: var(--text-muted);">From evals/CHANGELOG.md</span>
       </div>
 
-      {% if changelog %}
-        {% for item in changelog %}
+      <!-- Harness & Framework Fixes -->
+      <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--accent); margin: 20px 0 10px; display: flex; align-items: center; gap: 8px;">
+        <span>🛠️</span> Harness & Framework Fixes
+      </h3>
+      {% if changelog.harness_fixes %}
+        {% for item in changelog.harness_fixes %}
         <div class="changelog-card">
           <h4>
             <span>{{ item.title }}</span>
@@ -439,7 +443,35 @@
         </div>
         {% endfor %}
       {% else %}
-        <div class="card" style="color: var(--text-muted);">No changelog entries found.</div>
+        <div class="card" style="color: var(--text-muted); margin-bottom: 12px;">No harness fixes recorded.</div>
+      {% endif %}
+
+      <!-- Product Changes -->
+      <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--success); margin: 24px 0 10px; display: flex; align-items: center; gap: 8px;">
+        <span>📦</span> Product Changes (Tools, Instructions, Rules)
+      </h3>
+      {% if changelog.product_changes %}
+        {% for item in changelog.product_changes %}
+        <div class="changelog-card" style="border-left-color: var(--success);">
+          <h4>
+            <span>{{ item.title }}</span>
+            {% if item.commit %}<span class="commit-tag">commit {{ item.commit }}</span>{% endif %}
+          </h4>
+          <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 4px;">
+            <strong>Cause:</strong> {{ item.cause }}
+          </p>
+          <p style="font-size: 0.85rem; color: #e2e8f0; margin-bottom: 4px;">
+            <strong>Change:</strong> {{ item.change }}
+          </p>
+          {% if item.result %}
+          <p style="font-size: 0.85rem; color: var(--success);">
+            <strong>Learned:</strong> {{ item.result }}
+          </p>
+          {% endif %}
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="card" style="color: var(--text-muted);">No product changes recorded.</div>
       {% endif %}
     </section>
 
@@ -626,9 +658,13 @@
               <td><strong>{{ item.rule }}</strong></td>
               <td style="color: var(--text-muted);">{{ item.description }}</td>
               <td>
-                {% for p in item.personas %}
-                  <span class="badge badge-info" style="margin-right: 4px;">{{ p }}</span>
-                {% endfor %}
+                {% if item.personas and item.personas|length > 0 %}
+                  {% for p in item.personas %}
+                    <span class="badge badge-info" style="margin-right: 4px;">{{ p }}</span>
+                  {% endfor %}
+                {% else %}
+                  <span class="badge badge-danger">UNCOVERED</span>
+                {% endif %}
               </td>
             </tr>
             {% endfor %}
@@ -666,15 +702,32 @@
       </div>
 
       <div class="card" style="margin-bottom: 16px;">
-        <h3 style="color: var(--accent); text-transform: none; font-size: 1rem; margin-bottom: 8px;">How the Evaluations Run</h3>
+        <h3 style="color: var(--accent); text-transform: none; font-size: 1rem; margin-bottom: 8px;">Client Loop & Architecture</h3>
         <p style="margin-bottom: 10px; color: #cbd5e1;">
           Evaluations run via an agent loop built on the official <strong>MCP Python SDK</strong> with modern streamable HTTP transport (<code>Mcp-Method</code> headers and SSE stream decoding). The assistant-under-test connects directly to the deployed MCP server on Azure VM with zero mock bypasses.
         </p>
-        <ul style="padding-left: 20px; color: var(--text-muted); font-size: 0.85rem; margin-bottom: 12px;">
+        <p style="margin-bottom: 12px; color: #f8fafc; font-weight: 500; font-size: 0.85rem; background: rgba(56, 189, 248, 0.1); padding: 8px 12px; border-left: 3px solid var(--accent); border-radius: 4px;">
+          <strong>Proxy Notice:</strong> The evaluation runner uses the official MCP Python SDK loop (not the Claude Code CLI) with free-tier open models (assistant: <code>openai/gpt-oss-20b</code> / <code>qwen/qwen3.8-27b</code>, simulator: <code>openai/gpt-oss-120b</code>). Benchmark results serve as a proxy for the graders' Claude Code + Claude 3.5 Haiku evaluation environment.
+        </p>
+        <ul style="padding-left: 20px; color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px;">
           <li><strong>Authentication:</strong> Real OAuth 2.1 authorization code flow with PKCE S256, explicit <code>resource</code> parameters, and OTP retrieval from SMS gateway.</li>
-          <li><strong>Provider Split:</strong> Assistant on fast tool-calling model (<code>qwen/qwen3.8-27b</code>); simulator on large 120B reasoning model (<code>openai/gpt-oss-120b</code>) to avoid stacked rate limits.</li>
-          <li><strong>Verification:</strong> Post-conversation verification connects directly to PostgreSQL to verify table state, checks citizen portal at <code>/status</code>, and computes non-interference snapshots.</li>
+          <li><strong>Provider & Model Split:</strong> Assistant-under-test and simulator run on separate model endpoints to prevent shared rate-limit depletion.</li>
+          <li><strong>Database & Web Parity:</strong> Post-conversation verification connects directly to PostgreSQL (port 5432) to verify applications, assistant_submissions, and audit_log tables, checks citizen portal at <code>/status</code>, and computes non-interference snapshots.</li>
           <li><strong>Cleanup Guarantee:</strong> Guaranteed cleanup in a <code>finally</code> block deletes marker mobile records after every persona execution.</li>
+        </ul>
+
+        <h3 style="color: var(--warning); text-transform: none; font-size: 0.95rem; margin-bottom: 8px;">What Is NOT Covered (Out of Scope)</h3>
+        <ul style="padding-left: 20px; color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px;">
+          <li><strong>Biometric Hardware Authentication:</strong> Physical fingerprint/iris scanners at CSC kiosks cannot be stimulated via MCP JSON-RPC; mocked as successful physical verification in citizen persona pre-conditions.</li>
+          <li><strong>Physical Paper Seals & Holograms:</strong> Physical scrutiny of embossed seals on legacy land or age certificates is performed out-of-band by field verification staff before submission.</li>
+          <li><strong>Telephony & IVR Audio:</strong> Interactive voice phone channels are translated to text transcripts; audio codec latency is not part of the MCP eval harness.</li>
+        </ul>
+
+        <h3 style="color: var(--warning); text-transform: none; font-size: 0.95rem; margin-bottom: 8px;">Known Flaky Cases</h3>
+        <ul style="padding-left: 20px; color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px;">
+          <li><strong>Free-Tier Rate Limits (TPD / TPM):</strong> Free API tiers enforce strict daily token quotas (e.g. 200k TPD on Groq). Sudden 429 backoffs can cause a persona turn to terminate prematurely; recorded as model weakness rather than application defects.</li>
+          <li><strong>Malformed Function Call Emulation:</strong> Smaller open-source models occasionally emit unescaped JSON inside argument objects or fail to terminate multi-turn dialogues cleanly without <code>[END]</code> markers.</li>
+          <li><strong>Assamese Unicode Font Rendering:</strong> Complex conjunct glyphs in Assamese script (e.g. ক্ষ, ণ্ড, ঞ্জ) require modern UTF-8 terminal rendering; older shells may render decomposed character sequences.</li>
         </ul>
 
         <h3 style="color: var(--accent); text-transform: none; font-size: 0.9rem; margin-bottom: 6px;">How to Reproduce</h3>

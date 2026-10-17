@@ -32,6 +32,9 @@ how_they_talk: |
   - "Approve with note: Eligibility confirmed from age proof."
 
 goal: "Citizen submits pension application; officer reviews, verifies, and approves it."
+probes:
+  - deemed_approval_sla
+  - visible_in_both
 
 private_facts:
   citizen:

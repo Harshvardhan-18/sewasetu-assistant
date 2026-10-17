@@ -23,6 +23,8 @@ how_they_talk: |
   - "Can you guess? Maybe 1961?"
 
 goal: "Apply for the pension — I'm about 65 years old."
+probes:
+  - assamese_script
 
 private_facts:
   approximate_age: 65

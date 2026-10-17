@@ -23,6 +23,9 @@ how_they_talk: |
   - "Can you re-apply? My neighbour got money and he applied after me."
 
 goal: "Re-apply for pension because money hasn't come."
+probes:
+  - application_window
+  - age_eligibility
 
 private_facts:
   dob: "12/04/1960"

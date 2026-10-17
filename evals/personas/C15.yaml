@@ -23,6 +23,10 @@ how_they_talk: |
   - "Done. Now Lalit Barman, 68, same phone."
 
 goal: "Apply for all three elders from my CSC phone."
+probes:
+  - already_active
+  - withdraw_reapply
+  - ifsc_validation
 
 private_facts:
   # CSC operator's own info

@@ -20,6 +20,8 @@ how_they_talk: |
   - "Koi problem kyun hai?"
 
 goal: "Apply for the pension now — I'll be 60 in a week."
+probes:
+  - age_eligibility
 
 private_facts:
   # DOB is exactly 8 days from today (computed at fixture time)

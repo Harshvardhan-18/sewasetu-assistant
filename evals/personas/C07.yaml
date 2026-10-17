@@ -22,6 +22,9 @@ how_they_talk: |
   - "Haan, withdraw kar do, phr sahi wala dalo."
 
 goal: "Fix the wrong bank account number in my pending application."
+probes:
+  - withdraw_reapply
+  - ifsc_validation
 
 private_facts:
   dob: "05/07/1963"

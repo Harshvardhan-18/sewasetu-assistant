@@ -23,6 +23,11 @@ how_they_talk: |
   - "Proof (voter ID) ka photo link deti hoon: https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c01_kamala_voter_id.jpg"
 
 goal: "Apply for the old-age pension on my own."
+probes:
+  - age_eligibility
+  - age_proof_validation
+  - scheme_facts_accuracy
+  - visible_in_both
 
 private_facts:
   dob: "03/03/1955"

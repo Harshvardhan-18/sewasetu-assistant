@@ -24,6 +24,7 @@ import requests
 from tools.oauth_client import (
     OAuthClient,
     http_post_json,
+    parse_sse_or_json,
     MODERN_PROTOCOL_VERSION,
     MODERN_META,
 )
@@ -168,43 +169,93 @@ def run_s3_token_lifecycle(client: OAuthClient) -> tuple[bool, str]:
     return True, "Revocation kills refresh and end_my_session invalidates access immediately"
 
 
+EXPECTED_CITIZEN_TOOLS = {
+    "get_scheme_info",
+    "get_my_status",
+    "check_eligibility",
+    "save_application_draft",
+    "attach_age_proof",
+    "get_upload_link",
+    "preview_application",
+    "submit_application",
+    "withdraw_application",
+    "end_my_session",
+}
+
+EXPECTED_OFFICER_TOOLS = {
+    "queue_overview",
+    "list_applications",
+    "search_applications",
+    "get_application",
+    "verify_application",
+    "decide_application",
+    "my_recent_decisions",
+}
+
+
+def _fetch_mcp_tools_with_handshake(url: str, token: str, handshake_style: str) -> set[str]:
+    """Queries tools/list using either modern streamable HTTP or standard JSON-RPC."""
+    if handshake_style == "modern_streamable":
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream, application/json",
+            "Mcp-Method": "tools/list",
+            "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
+        }
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": MODERN_META}}
+    else:  # standard JSON-RPC
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        payload = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=15)
+    if resp.status_code != 200:
+        raise ValueError(f"HTTP {resp.status_code} calling {url} ({handshake_style}): {resp.text[:200]}")
+    body = parse_sse_or_json(resp.text)
+    tools = body.get("result", {}).get("tools", [])
+    return {t["name"] for t in tools if isinstance(t, dict) and "name" in t}
+
+
 def run_s4_tools_list_separation(client: OAuthClient) -> tuple[bool, str]:
-    """S4: tools/list on each endpoint contains zero tools from the other."""
-    # List tools on citizen endpoint
-    tok_cit = client.obtain_citizen_token("9990000078", canonical_url=CITIZEN_URL)
-    headers_cit = {
-        "Authorization": f"Bearer {tok_cit.access_token}",
-        "Content-Type": "application/json",
-        "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
-    }
-    payload_cit = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": MODERN_META}}
-    _, body_cit, _ = http_post_json(CITIZEN_URL, payload_cit, headers=headers_cit)
-    cit_tools = {t["name"] for t in body_cit.get("result", {}).get("tools", [])}
+    """S4: Exact tool set assertion (10 citizen, 7 officer) across both handshake styles."""
+    mobile = "9990000078"
+    cleanup_persona(mobile)
 
-    # List tools on officer endpoint
+    tok_cit = client.obtain_citizen_token(mobile, canonical_url=CITIZEN_URL)
     tok_off = client.obtain_officer_token(ADMIN_USER, ADMIN_PASS, canonical_url=OFFICER_URL)
-    headers_off = {
-        "Authorization": f"Bearer {tok_off.access_token}",
-        "Content-Type": "application/json",
-        "MCP-Protocol-Version": MODERN_PROTOCOL_VERSION,
-    }
-    payload_off = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": MODERN_META}}
-    _, body_off, _ = http_post_json(OFFICER_URL, payload_off, headers=headers_off)
-    off_tools = {t["name"] for t in body_off.get("result", {}).get("tools", [])}
 
-    officer_only = {"verify_application", "decide_application", "queue_overview", "list_applications", "search_applications"}
-    citizen_only = {"submit_application", "end_my_session", "withdraw_application"}
+    handshakes = ["modern_streamable", "standard_jsonrpc"]
+    for hs in handshakes:
+        # 1. Citizen tools
+        cit_tools = _fetch_mcp_tools_with_handshake(CITIZEN_URL, tok_cit.access_token, hs)
+        cit_core = cit_tools - {"whoami"}
+        if cit_core != EXPECTED_CITIZEN_TOOLS:
+            missing = EXPECTED_CITIZEN_TOOLS - cit_core
+            extra = cit_core - EXPECTED_CITIZEN_TOOLS
+            return False, f"Citizen tools/list ({hs}) failed assertion! Missing: {missing}, Extra: {extra}"
 
-    cit_leak = cit_tools.intersection(officer_only)
-    if cit_leak:
-        return False, f"Citizen tools/list exposed officer tools: {cit_leak}"
+        cit_leak = cit_tools.intersection(EXPECTED_OFFICER_TOOLS)
+        if cit_leak:
+            return False, f"Citizen tools/list ({hs}) exposed officer tools: {cit_leak}"
 
-    off_leak = off_tools.intersection(citizen_only)
-    if off_leak:
-        return False, f"Officer tools/list exposed citizen tools: {off_leak}"
+        # 2. Officer tools
+        off_tools = _fetch_mcp_tools_with_handshake(OFFICER_URL, tok_off.access_token, hs)
+        off_core = off_tools - {"whoami"}
+        if off_core != EXPECTED_OFFICER_TOOLS:
+            missing = EXPECTED_OFFICER_TOOLS - off_core
+            extra = off_core - EXPECTED_OFFICER_TOOLS
+            return False, f"Officer tools/list ({hs}) failed assertion! Missing: {missing}, Extra: {extra}"
 
-    cleanup_persona("9990000078")
-    return True, f"Clean separation: citizen has {len(cit_tools)} tools, officer has {len(off_tools)} tools"
+        off_leak = off_tools.intersection(EXPECTED_CITIZEN_TOOLS)
+        if off_leak:
+            return False, f"Officer tools/list ({hs}) exposed citizen tools: {off_leak}"
+
+    cleanup_persona(mobile)
+    return True, "Exact tool sets verified on both handshake styles (citizen: 10 tools, officer: 7 tools; 0 cross-exposure)"
 
 
 def run_s5_internal_edge_blocking() -> tuple[bool, str]:

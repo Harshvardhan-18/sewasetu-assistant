@@ -22,6 +22,9 @@ how_they_talk: |
   - "Is there any other way?"
 
 goal: "Apply for the pension — I know I'll be 60 soon."
+probes:
+  - follow_up
+  - deemed_approval_sla
 
 private_facts:
   # DOB is (window_close + 9 days), computed at fixture time

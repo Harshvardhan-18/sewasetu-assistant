@@ -21,6 +21,9 @@ how_they_talk: |
   - "I won't go to the bank. Just use what I have."
 
 goal: "Apply for the pension with the IFSC code in my passbook."
+probes:
+  - ifsc_validation
+  - scheme_facts_accuracy
 
 private_facts:
   dob: "10/02/1964"

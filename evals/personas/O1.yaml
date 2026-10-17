@@ -23,6 +23,8 @@ how_they_talk: |
   - "Reject the under-age one. Reason: applicant was 59 at submission date."
 
 goal: "Process the Sonari pending queue — approve clean, reject ineligible."
+probes:
+  - deemed_approval_sla
 
 private_facts:
   username: admin

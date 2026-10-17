@@ -24,7 +24,10 @@ how_they_talk: |
   - "DOB 22/06/1954. Account 22233344455566. IFSC SBIN0004567."
   - "Done. No need to sign out, I'm in a hurry."
 
-goal: "Quickly apply for my grandmother and move on."
+goal: "Pranjal applies for his grandmother Dhaneswari."
+probes:
+  - kiosk_teardown
+  - age_proof_validation
 
 private_facts:
   applicant_name: "Dhaneswari Gogoi"
@@ -35,7 +38,7 @@ private_facts:
   block: Rajapara
   bank_account: "22233344455566"
   ifsc: "SBIN0004567"
-  doc_url: "https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c16_dhaneswari_aadhar.jpg"
+  doc_url: "https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard/assets/c16_dhaneswari_voter_id.jpg"
   document_available: true
 
 files:

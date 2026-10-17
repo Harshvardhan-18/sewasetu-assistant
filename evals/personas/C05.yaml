@@ -23,6 +23,8 @@ how_they_talk: |
   - "Yes, notifications to my number only, she doesn't have a phone."
 
 goal: "Apply for my mother Pramila's pension from my phone."
+probes:
+  - age_proof_validation
 
 private_facts:
   applicant_name: "Pramila Chetia"
