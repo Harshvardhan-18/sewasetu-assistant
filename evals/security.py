@@ -216,6 +216,19 @@ def run_s5_internal_edge_blocking() -> tuple[bool, str]:
     return True, f"Edge successfully blocked public access to /internal (HTTP {resp.status_code})"
 
 
+def _extract_envelope(res: dict) -> dict:
+    if isinstance(res, dict) and "result" in res:
+        res = res["result"]
+    if isinstance(res, dict) and "content" in res:
+        for item in res.get("content", []):
+            if isinstance(item, dict) and item.get("type") == "text":
+                try:
+                    return json.loads(item.get("text", "{}"))
+                except Exception:
+                    pass
+    return res if isinstance(res, dict) else {}
+
+
 def run_s6_hostile_strings_stored_literally(client: OAuthClient) -> tuple[bool, str]:
     """S6: Hostile injection strings are stored literally and do not alter DB structure."""
     mobile = "9990000079"
@@ -224,9 +237,10 @@ def run_s6_hostile_strings_stored_literally(client: OAuthClient) -> tuple[bool, 
     hostile_name = "Robert'); DROP TABLE applications;--"
     tok = client.obtain_citizen_token(mobile, canonical_url=CITIZEN_URL)
 
-    res = client.call_tool(
+    # 1. Save draft with hostile applicant name
+    res_draft = client.call_tool(
         tok.access_token,
-        "submit_application",
+        "save_application_draft",
         {
             "applicant_name": hostile_name,
             "dob": "10/10/1950",
@@ -236,14 +250,55 @@ def run_s6_hostile_strings_stored_literally(client: OAuthClient) -> tuple[bool, 
             "block": "Sonari",
             "bank_account": "11223344556677",
             "ifsc": "SBIN0001234",
-            "doc_url": f"{PUBLIC_BASE_URL}/eval-dashboard/assets/c01_kamala_aadhar.jpg",
         },
         mcp_url=CITIZEN_URL,
     )
-    if isinstance(res, dict) and res.get("isError"):
-        return False, f"Submission error on hostile input: {res}"
+    env_draft = _extract_envelope(res_draft)
+    if not env_draft.get("ok"):
+        return False, f"Failed to save draft: {env_draft}"
 
-    # Verify database: table still exists and literal string is stored
+    # 2. Attach age proof
+    res_proof = client.call_tool(
+        tok.access_token,
+        "attach_age_proof",
+        {
+            "document_type": "voter_id",
+            "filename": "c01_kamala_aadhar.jpg",
+            "file_url": f"{PUBLIC_BASE_URL}/eval-dashboard/assets/c01_kamala_aadhar.jpg",
+        },
+        mcp_url=CITIZEN_URL,
+    )
+    env_proof = _extract_envelope(res_proof)
+    if not env_proof.get("ok"):
+        return False, f"Failed to attach proof: {env_proof}"
+
+    # 3. Preview application to generate confirmation code
+    res_prev = client.call_tool(
+        tok.access_token,
+        "preview_application",
+        {},
+        mcp_url=CITIZEN_URL,
+    )
+    env_prev = _extract_envelope(res_prev)
+    conf_code = env_prev.get("data", {}).get("confirmation_code")
+    if not conf_code:
+        return False, f"Could not obtain confirmation code from preview: {env_prev}"
+
+    # 4. Submit application
+    res_sub = client.call_tool(
+        tok.access_token,
+        "submit_application",
+        {
+            "confirmation_code": conf_code,
+            "declaration_accepted": True,
+        },
+        mcp_url=CITIZEN_URL,
+    )
+    env_sub = _extract_envelope(res_sub)
+    if not env_sub.get("ok"):
+        return False, f"Submission error on hostile input: {env_sub}"
+
+    # 5. Verify database: table still exists and literal string is stored
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -255,7 +310,7 @@ def run_s6_hostile_strings_stored_literally(client: OAuthClient) -> tuple[bool, 
         conn.close()
 
     cleanup_persona(mobile)
-    return True, "SQL injection string stored literally; applications table intact"
+    return True, "SQL injection string stored literally in applications table; table intact"
 
 
 def run_s7_identity_isolation(client: OAuthClient) -> tuple[bool, str]:
