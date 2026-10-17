@@ -1,60 +1,58 @@
 # Loom Presentation Script (3:00 — Face + Screen)
 
-**Video Title**: SewaSetu Old Age Pension AI Assistant — Architecture, Evals, & Handover  
-**Presenter**: Harshvardhan (New Digital Fellow)  
+**Title**: SewaSetu Old Age Pension AI Assistant — Architecture, Security, & Handover  
+**Presenter**: Harshvardhan  
 **Target Duration**: Exactly 3 minutes (03:00)  
 **Live URL**: `https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard`  
 
 ---
 
-### [0:00 – 0:20] Hook & Headline
-**Screen**: Public Eval Dashboard (`/eval-dashboard`) showing Headline Cards, followed by split-screen or quick clip of the citizen flow.  
+### [0:00 – 0:25] Hook & Headline (Spoken: ~60 words)
+**Screen**: Public Eval Dashboard (`/eval-dashboard`), showing live endpoints and security status cards.  
 **Spoken Audio**:
-> "Welcome Director. You asked us to enable any AI assistant to help senior citizens in Sonari block apply for and track their Old Age Pension—built on open standards with the portal as the single system of record.
+> "Welcome Director. You asked us to enable any AI assistant to help citizens in Sonari block apply for and track their Old Age Pension—using open Model Context Protocol standards with the government portal as the single system of record.
 > 
-> Here on our live Azure deployment, the assistant operates over two official Model Context Protocol servers. A grandson can sit with his grandmother at a kiosk, apply through the citizen assistant, have the block officer review and approve it on the officer assistant, and see the exact records mirrored instantly across the portal database. Here is what we built, what we measured, and what we learned."
+> Today, our dual MCP architecture is live on Azure, providing strict statutory enforcement, cryptographic identity isolation, and verified database integrity. Here is our architecture and demonstration."
 
 ---
 
-### [0:20 – 1:10] Architecture & Key Design Decisions
-**Screen**: System architecture diagram (`deploy/Caddyfile`, `citizen_mcp/server.py`, `officer_mcp/server.py`, shared service layer).  
+### [0:25 – 1:15] Core Architecture Decisions (Spoken: ~115 words)
+**Screen**: Architecture diagram in `README.md` and Caddy reverse proxy routing.  
 **Spoken Audio**:
-> "Three architectural decisions anchor the system:
+> "Three architectural decisions anchor the platform:
 > 
-> First, **strict role separation**. We run two distinct MCP servers with separate OAuth scopes and audiences. A citizen assistant connects to `/citizen/mcp` and physically cannot see officer tools; an officer connects to `/officer/mcp`. Caller identity is cryptographically bound to the token subject—no tool ever accepts an applicant phone number as an argument.
+> First, **strict role separation**. We run two isolated MCP servers on separate endpoints: `/citizen/mcp` and `/officer/mcp`. They enforce distinct OAuth scopes and audiences. Citizen assistants physically cannot see administrative tools. Identity is extracted directly from the verified JWT token subject—no tool ever accepts an applicant phone number as an argument.
 > 
-> Second, **one unified submission path**. Whether submitted via the web form or the AI assistant, all applications call `apply_for_pension_core()`. The assistant can never grant a pension the counter would not.
+> Second, **one unified submission path**. Both the web portal and the citizen assistant call the shared `apply_for_pension_core()` domain service. The AI cannot approve or submit anything the physical counter would reject.
 > 
-> Third, **tool surfaces engineered for small models**. We kept the citizen prompt surface to 1,963 tokens—well under our 3,500 token ceiling. Tools report all validation problems at once, and we enforce explicit kiosk teardown via `end_my_session` to protect elders sharing phones."
+> Third, **compact tool surfaces**. Citizen MCP uses 10 tools taking 1,963 prompt tokens, well under the 3,500 token ceiling."
 
 ---
 
-### [1:10 – 2:20] Personas, The Counter Hour, & Eval Iteration
-**Screen**: Scroll to Persona Catalog on the Dashboard (`docs/COUNTER_HOUR.md` open in background). Click into C16, C02, and O3.  
+### [1:15 – 2:05] Counter Personas & Security Verification (Spoken: ~115 words)
+**Screen**: Eval Dashboard persona catalog showing C01, C02, C16, and O3, followed by `evals/security.py` results.  
 **Spoken Audio**:
-> "Before writing code, we spent an hour imagining the Sonari counter. We derived 19 starter personas and 3 held-out cases from real village interactions:
-> - **C16 (Pranjal & Dhaneswari)**: A grandson applying for his 72-year-old grandmother at a kiosk, requiring immediate session teardown so the next person in queue cannot see her data.
-> - **C02 (Under-Age Elder)**: An elder turning 60 in eight days; the assistant accurately computes his milestone date and refuses to submit early.
-> - **O3 (Dilip Chetia)**: An officer reviewing applications where an applicant embedded prompt-injection text in the village field. The assistant treats it strictly as untrusted data and executes zero unauthorized status changes.
+> "We derived 19 starter personas directly from rural counter scenarios:
+> - **C16**: A grandson applying for his grandmother at a kiosk, triggering explicit session teardown via `end_my_session` to protect elder privacy.
+> - **C02**: An applicant under 60 whose application is stopped before early submission.
+> - **O3**: An officer reviewing records where applicants entered prompt injections into text fields; untrusted input is safely contained.
 > 
-> On our baseline run, our deterministic security suite passed 7 out of 7, but full multi-turn runs uncovered two key issues:
-> 1. In C10 and C07, internal officer rejection notes were exposed to citizens. We sanitized the status pipeline to return empathetic explanations without internal prefixes.
-> 2. On Groq's free tier, uninterrupted runs hit a 200k daily token quota. We implemented exponential backoff and resume caching, verifying that isolated re-runs pass 100%."
+> Our deterministic security suite passed 7 out of 7 tests across role separation, audience binding, and perimeter isolation. Persona evaluations run via the official MCP Python SDK loop against open models on Groq, serving as an open proxy for small-model benchmarks."
 
 ---
 
-### [2:20 – 2:50] Design Note & What I Would Do Differently
-**Screen**: `docs/DESIGN_NOTE.md` / `docs/EVAL_FINDINGS.md`.  
+### [2:05 – 2:40] Free-Tier Learnings & What We'd Do Differently (Spoken: ~80 words)
+**Screen**: `docs/DESIGN_NOTE.md` and token monitoring logs.  
 **Spoken Audio**:
-> "What did I learn? Small models like Claude Haiku or open-source equivalents thrive when tools are outcome-shaped rather than granular CRUD APIs. 
+> "What did we learn? Small models need outcome-shaped tools that return unified error payloads rather than chatty CRUD calls.
 > 
-> What would I do differently? I would build a deterministic local replay cache for baseline evaluations earlier. Relying on cloud API free tiers introduced token quota ceilings that complicated automated testing, even though our application logic was completely sound."
+> What would I do differently? I would introduce an offline replay cache for evaluation runs earlier. Multi-turn benchmarks hit Groq's free-tier ceiling of 200,000 tokens per day. We engineered exponential backoff, rate pacing, and checkpoint resume to maintain database and test integrity without artificial failures."
 
 ---
 
-### [2:50 – 3:00] Handover & Out-of-Scope Boundaries
-**Screen**: Eval Dashboard footer showing `/eval-dashboard/api/runs`, `/eval-dashboard/healthz`, and terminal running `scripts/healthcheck.sh`.  
+### [2:40 – 3:00] Handover & Clean Database Hygiene (Spoken: ~45 words)
+**Screen**: Terminal showing `scripts/healthcheck.sh` passing and database count at 100,000 records.  
 **Spoken Audio**:
-> "The deployment is hardened with automated cron healthchecks, nightly rotating database backups, and clean database hygiene with zero leftover marker records. Biometric hardware scanners and physical paper seals remain out of scope for software MCP.
+> "The production environment is hardened with daily rotating backups, container restart policies, and zero leftover marker records—preserving the baseline 100,000 applications.
 > 
-> Everything is live, documented, and ready for your review at `/eval-dashboard`. Thank you."
+> All code, tests, and documentation are committed and live at `/eval-dashboard`. The system is ready for review."

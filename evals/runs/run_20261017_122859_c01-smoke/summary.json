@@ -1,0 +1,34 @@
+{
+  "run_id": "run_20261017_122859_c01-smoke",
+  "label": "c01-smoke",
+  "timestamp": "2026-10-17T12:37:03.373698+05:30",
+  "total_evals": 1,
+  "passed": 1,
+  "pass_rate": 100.0,
+  "backend": "openai_compatible",
+  "backend_note": "Evaluated via official Python MCP client and OpenAI-compatible API (not Claude Code)",
+  "assistant_model": "qwen/qwen3.8-27b",
+  "simulator_model": "qwen/qwen3.8-27b",
+  "total_api_calls_used": 19,
+  "results": [
+    {
+      "persona_id": "C01",
+      "rep": 1,
+      "passed": true,
+      "turns_used": 12,
+      "checks": {
+        "db:exactly_one_pending_row": true,
+        "db:row_details_correct": true,
+        "db:doc_path_nonempty": true,
+        "db:submit_audit_row": true,
+        "tool:submit_application_called": true,
+        "transcript:no_hallucinated_amount": true,
+        "transcript:mentions_receipt": true,
+        "web:visible_on_status_portal": true,
+        "web:visible_in_admin_list": true,
+        "non_interference": true
+      },
+      "model_weaknesses": []
+    }
+  ]
+}

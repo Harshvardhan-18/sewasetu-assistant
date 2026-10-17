@@ -1,83 +1,134 @@
-# Sewa Setu — Old Age Pension Portal
+# SewaSetu Old Age Pension AI Assistant
 
-Department of Social Welfare, Government of Purvanchal. Maintained in-house.
+An open-standards, Model Context Protocol (MCP) enabled assistant for the Department of Social Welfare, Government of Purvanchal. Built to assist senior citizens and block welfare officers with old-age pension applications under strict statutory compliance.
 
-## Running
+The assistant connects to the live portal as its single system of record, ensuring the AI can never grant an entitlement that the physical counter or official paper form would reject.
 
-```
-ADMIN_PASSWORD=pick-something docker compose up --build
-```
+```mermaid
+flowchart TD
+    subgraph Clients["Clients & Assistants"]
+        C_AI["Citizen AI Assistant<br/>(Streamable HTTP / MCP)"]
+        O_AI["Officer AI Assistant<br/>(Streamable HTTP / MCP)"]
+        Browser["Citizen & Officer Browsers"]
+    end
 
-- Portal: http://localhost:8000
-- Status portal: http://localhost:8000/status (mobile number + password; the
-  password is the applicant's date of birth as DDMMYYYY)
-- Departmental login: http://localhost:8000/admin (user `admin`, password from
-  `ADMIN_PASSWORD`)
-- SMS gateway console (simulated telecom): http://localhost:8000/__gateway/ —
-  OTPs and notifications appear here once "delivered" (1–4 s carrier latency).
-  The gateway's inbox is also readable as JSON at
-  `/__gateway/api/messages?to=<mobile>`.
-- Database: Postgres, loaded from `seed/seed.sql` on first boot (~100k applications).
+    subgraph Edge["Edge Layer (Caddy Reverse Proxy & TLS)"]
+        Caddy["Caddy v2 (Port 80/443)<br/>Automatic TLS & Route Protection"]
+    end
 
-## Deploying on a server
+    subgraph MCP["MCP Services (FastAPI + MCP SDK)"]
+        CitizenMCP["Citizen MCP Server (:8001)<br/>Audience: /citizen/mcp<br/>10 Citizen Tools"]
+        OfficerMCP["Officer MCP Server (:8002)<br/>Audience: /officer/mcp<br/>7 Officer Tools"]
+    end
 
-Set `PUBLIC_BASE_URL` to the address people will use (for example
-`https://sewasetu.example.in`). It is stamped into sign-in tokens and the discovery documents
-described below, so a wrong value means other applications cannot find the sign-in page. Put
-the portal behind HTTPS; some applications refuse to sign in over plain HTTP.
+    subgraph PortalStack["Core Portal & Database"]
+        Flask["Flask Portal & Auth Server (:8000)<br/>RFC 8414 / RFC 9728 Discovery<br/>RS256 JWT Issuer & Session Token Bucket"]
+        DB[(PostgreSQL 15<br/>100,000 Production Seed Records)]
+        SLA["Nightly SLA Daemon<br/>(15-Day Statutory Deemed Approval)"]
+        SMS["Simulated SMS Gateway (:8025)"]
+    end
 
-```
-PUBLIC_BASE_URL=https://sewasetu.example.in ADMIN_PASSWORD=pick-something docker compose up --build -d
-```
+    subgraph EvalStack["Evaluation System"]
+        Dashboard["Eval Dashboard (:8080)<br/>Static Runs & Live Transcript Viewer"]
+        Harness["Eval Runner (evals.run)<br/>MCP SDK Loop + Groq Models"]
+    end
 
-## What the portal does
+    C_AI -->|Bearer citizen:mobile| Caddy
+    O_AI -->|Bearer officer:username| Caddy
+    Browser --> Caddy
 
-Citizen flow: mobile → OTP → personal details → address → bank details →
-age-proof upload → preview and declaration → application number. A nightly
-job (`scripts/deemed_approval.py`, via cron in the `scheduler` container)
-deems approved any application still pending after the 15-day statutory SLA.
+    Caddy -->|/citizen/mcp| CitizenMCP
+    Caddy -->|/officer/mcp| OfficerMCP
+    Caddy -->|/, /status, /admin, /oauth/*| Flask
+    Caddy -->|/eval-dashboard| Dashboard
 
-Rules enforced at submission, in `validate_application()` in `app/app.py`:
-applicant is 60 years of age or above; required fields and an age-proof
-document are present; the scheme window is open; and the mobile number holds
-no other active (pending / approved / deemed-approved) application. A pending
-application can be withdrawn from the status portal, after which the same
-mobile may apply again.
-
-Departmental users see a dashboard, list and filter applications, approve or
-reject pending ones, and see the audit trail per application.
-
-## Layout
-
-```
-app/          Flask application, templates, config, nightly job
-seed/         seed.sql — production data snapshot
-smsgw/        simulated SMS gateway
+    CitizenMCP -->|Verify JWT via JWKS| Flask
+    OfficerMCP -->|Verify JWT via JWKS| Flask
+    CitizenMCP -->|apply_for_pension_core()| DB
+    OfficerMCP -->|decide_application()| DB
+    Flask --> DB
+    SLA --> DB
+    Flask --> SMS
+    Harness -.->|Evaluates| CitizenMCP
+    Harness -.->|Evaluates| OfficerMCP
 ```
 
-## Letting other applications act for a citizen or an officer
+---
 
-Sewa Setu is also an **OAuth 2.1 authorization server**. A third-party application can act
-for a citizen (scope `citizen`) or for a block officer (scope `officer`) once that person
-signs in on the portal and approves it. Citizens sign in by mobile and OTP, officers with the
-departmental login. The application never handles the OTP or the password.
+## Live Endpoints
 
-- Discovery: `/.well-known/oauth-authorization-server` (RFC 8414)
-- Registration: `/oauth/register` (RFC 7591), or a client ID metadata document URL as `client_id`
-- Authorization: `/oauth/authorize` (authorization code with PKCE S256; the `resource` the
-  application asks for becomes the token's audience, RFC 8707)
-- Tokens: `/oauth/token`. Access tokens are RS256 JWTs. A sign-in is a **session with an
-  absolute end**: 2 hours for a citizen, 8 hours for an officer, counted from the consent.
-  Access tokens are short (20 / 30 minutes) and refresh tokens rotate within the session but
-  never extend it; after it ends the person signs in again. Portals are used on shared phones
-  and kiosks.
-- Sign-out: `/oauth/revoke` (RFC 7009). People can also end any sign-in from the status
-  portal (**Connected applications**) or, for officers, the admin dashboard.
-- Keys: `/.well-known/jwks.json`
+- **Public Pension Portal:** `https://sewasetu-hv.koreacentral.cloudapp.azure.com`
+- **Citizen MCP Server:** `https://sewasetu-hv.koreacentral.cloudapp.azure.com/citizen/mcp`
+- **Officer MCP Server:** `https://sewasetu-hv.koreacentral.cloudapp.azure.com/officer/mcp`
+- **Evaluation Dashboard:** `https://sewasetu-hv.koreacentral.cloudapp.azure.com/eval-dashboard`
+- **OAuth Discovery:** `https://sewasetu-hv.koreacentral.cloudapp.azure.com/.well-known/oauth-authorization-server`
+- **Protected Resource Discovery:** `https://sewasetu-hv.koreacentral.cloudapp.azure.com/.well-known/oauth-protected-resource`
 
-A service that receives one of these tokens verifies it with the JWKS, checks `iss` is this
-portal, checks `aud` is its own canonical URL, and reads `scope`, `role` and `sub`
-(`citizen:<mobile>` or `officer:<username>`).
+---
 
-Long-lived **program tokens** for unattended use (role officer) are issued by an
-administrator at `/admin/tokens`.
+## Running Locally
+
+### 1. Requirements & Stack Boot
+Ensure Docker and Docker Compose are installed. Clone the repository and boot the stack:
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+```
+
+### 2. Service Access
+- Web Portal: `http://localhost:8000`
+- Citizen MCP: `http://localhost:8001/citizen/mcp`
+- Officer MCP: `http://localhost:8002/officer/mcp`
+- Eval Dashboard: `http://localhost:8080/eval-dashboard`
+- SMS Gateway: `http://localhost:8025`
+
+### 3. Running Unit & Integration Tests
+```bash
+pytest tests/
+```
+
+---
+
+## Running Evaluations
+
+The evaluation harness implements synthetic persona testing using the Model Context Protocol:
+
+```bash
+# Run security and tool surface isolation tests
+python -m evals.security
+
+# Run a single persona smoke test
+python -m evals.run --persona C01 --reps 1 --label c01-smoke
+
+# Run the 8 core baseline personas with pace and resume
+python -m evals.run --personas C01,C02,C03,C07,C08,C16,O1,O3 --reps 1 --resume --label core-baseline --pace-seconds 2
+```
+
+> [!NOTE]
+> **Evaluation Backend Notice**: In accordance with project configuration, evaluations run via the official MCP Python SDK client loop against open models on Groq (such as `openai/gpt-oss-20b`) rather than Claude Code, because no Anthropic API key is configured. The harness converts MCP tool definitions to standard OpenAI-compatible function-calling schemas, serving as a direct open-standard proxy for small-model tool-calling benchmarks.
+
+---
+
+## Directory Map
+
+```text
+sewasetu-assistant/
+├── app/                  # Flask portal, OAuth2 authorization server, database models, and services
+│   ├── services/         # Domain logic (apply_for_pension_core, status_queries, officer_actions)
+│   ├── templates/        # Portal web templates (citizen form, status tracking, officer admin)
+│   └── scripts/          # Statutory deemed-approval scheduler job
+├── citizen_mcp/          # Citizen MCP server (10 outcome-oriented tools, citizen OAuth audience)
+├── officer_mcp/          # Officer MCP server (7 administrative review tools, officer OAuth audience)
+├── mcp_common/           # Shared MCP utilities (JWT verification, rate-limiting, error handling)
+├── evals/                # Evaluation framework
+│   ├── personas/         # YAML specs for 19 counter personas and 3 held-out test cases
+│   ├── runs/             # JSON execution records, transcripts, and evaluation artifacts
+│   ├── run.py            # Headless simulator and assistant execution harness with backoff
+│   └── security.py       # Deterministic suite for OAuth token isolation and role boundaries
+├── eval_dashboard/       # Web dashboard visualizing test runs, coverage matrix, and transcripts
+├── deploy/               # Deployment configurations (Caddyfile, Dockerfiles, compose overrides)
+├── docs/                 # Architectural specifications, counter notes, and submission docs
+├── scripts/              # Backup utilities, DB reset scripts, healthchecks, and smoke tests
+└── tests/                # Unit and end-to-end integration test suites
+```

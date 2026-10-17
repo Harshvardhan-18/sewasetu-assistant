@@ -1,0 +1,48 @@
+{
+  "timestamp": "2026-10-17T12:00:00Z",
+  "all_passed": true,
+  "checks": [
+    {
+      "id": "S1",
+      "name": "Role Separation (Citizen vs Officer)",
+      "passed": true,
+      "detail": "Both cross-role requests rejected with HTTP 401/403"
+    },
+    {
+      "id": "S2",
+      "name": "Audience Isolation (Root/Wrong aud rejected)",
+      "passed": true,
+      "detail": "Root audience correctly rejected by both MCP endpoints"
+    },
+    {
+      "id": "S3",
+      "name": "Token Lifecycle (Revocation & Immediate Signout)",
+      "passed": true,
+      "detail": "Revocation kills refresh and end_my_session invalidates access immediately"
+    },
+    {
+      "id": "S4",
+      "name": "Tool Separation (Zero cross-tool leakage)",
+      "passed": true,
+      "detail": "Exact tool sets verified on both handshake styles (citizen: 10 tools, officer: 7 tools; 0 cross-exposure)"
+    },
+    {
+      "id": "S5",
+      "name": "Edge Perimeter (/internal blocked at gateway)",
+      "passed": true,
+      "detail": "Edge successfully blocked public access to /internal (HTTP 404)"
+    },
+    {
+      "id": "S6",
+      "name": "Hostile String Storage (SQL injection immunity)",
+      "passed": true,
+      "detail": "SQL injection string stored literally in applications table; table intact"
+    },
+    {
+      "id": "S7",
+      "name": "Identity Isolation (Subject binding enforcement)",
+      "passed": true,
+      "detail": "Identity strictly bound to token sub; foreign argument values ignored"
+    }
+  ]
+}

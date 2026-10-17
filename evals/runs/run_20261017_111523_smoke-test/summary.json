@@ -1,0 +1,30 @@
+{
+  "run_id": "run_20261017_111523_smoke-test",
+  "label": "smoke-test",
+  "timestamp": "2026-10-17T11:15:26.389889+05:30",
+  "total_evals": 1,
+  "passed": 0,
+  "pass_rate": 0.0,
+  "model": "claude-3-5-haiku-20241022",
+  "results": [
+    {
+      "persona_id": "C01",
+      "rep": 1,
+      "passed": false,
+      "turns_used": 1,
+      "checks": {
+        "db:exactly_one_pending_row": false,
+        "db:row_details_correct": false,
+        "db:doc_path_nonempty": false,
+        "db:submit_audit_row": false,
+        "tool:get_scheme_info_called": false,
+        "tool:submit_application_called": false,
+        "transcript:no_hallucinated_amount": true,
+        "transcript:mentions_receipt": false,
+        "web:visible_on_status_portal": true,
+        "web:visible_in_admin_list": true,
+        "non_interference": true
+      }
+    }
+  ]
+}

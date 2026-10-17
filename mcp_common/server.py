@@ -86,6 +86,155 @@ class EnsureWWWAuthenticateScopeMiddleware:
         await self.app(scope, receive, send_wrapper)
 
 
+def sanitize_log_text(text: str) -> str:
+    """Sanitizes text for safe logging: masks 10-digit phone numbers and redacts tokens/passwords."""
+    if not isinstance(text, str):
+        return str(text)
+    # Mask 10-digit phone numbers: 9876543210 -> 98*****210
+    text = re.sub(r"\b([6-9]\d{2})\d{4}(\d{3})\b", r"\1*****\2", text)
+    # Redact Bearer tokens
+    text = re.sub(r"Bearer\s+[a-zA-Z0-9_\-\.]+", "Bearer [REDACTED]", text, flags=re.IGNORECASE)
+    # Redact JWTs
+    text = re.sub(r"eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+", "[REDACTED_JWT]", text)
+    # Redact API keys / passwords
+    text = re.sub(r"(api[_-]?key|secret|password|token)=([^\s&]+)", r"\1=[REDACTED]", text, flags=re.IGNORECASE)
+    return text
+
+
+class RequestSizeLimitMiddleware:
+    """Enforces request body size limit (default 5MB) to protect against resource exhaustion."""
+
+    def __init__(self, app: ASGIApp, max_bytes: int = 5 * 1024 * 1024):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            for k, v in scope.get("headers", []):
+                if k.lower() == b"content-length":
+                    try:
+                        if int(v.decode("utf-8")) > self.max_bytes:
+                            resp = JSONResponse(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "error": {"code": -32000, "message": f"Payload Too Large: exceeds {self.max_bytes} bytes"},
+                                    "id": None,
+                                },
+                                status_code=413,
+                            )
+                            await resp(scope, receive, send)
+                            return
+                    except Exception:
+                        pass
+                    break
+
+        await self.app(scope, receive, send)
+
+
+class RequestTimeoutMiddleware:
+    """Enforces per-request timeout (default 30s) to prevent hanging connections."""
+
+    def __init__(self, app: ASGIApp, timeout_seconds: float = 30.0):
+        self.app = app
+        self.timeout_seconds = timeout_seconds
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        import anyio
+        try:
+            with anyio.fail_after(self.timeout_seconds):
+                await self.app(scope, receive, send)
+        except TimeoutError:
+            logger.error("MCP request timed out after %.1fs", self.timeout_seconds)
+            resp = JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32000, "message": "Request timed out"},
+                    "id": None,
+                },
+                status_code=504,
+            )
+            await resp(scope, receive, send)
+
+
+class SubjectRateLimitMiddleware:
+    """Generous per-subject in-memory rate limiter (default 120 req/minute). Returns HTTP 429 when exceeded."""
+
+    def __init__(self, app: ASGIApp, max_requests: int = 120, window_seconds: float = 60.0):
+        self.app = app
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests: dict[str, list[float]] = {}
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # Skip rate limit for unauthenticated health checks
+        path = scope.get("path", "")
+        if path.endswith("/healthz"):
+            await self.app(scope, receive, send)
+            return
+
+        # Derive subject or fallback to client IP
+        sub = current_subject()
+        if not sub:
+            client = scope.get("client")
+            sub = client[0] if client else "unknown"
+
+        now = time.time()
+        cutoff = now - self.window_seconds
+        reqs = [t for t in self.requests.get(sub, []) if t > cutoff]
+        reqs.append(now)
+        self.requests[sub] = reqs
+
+        if len(reqs) > self.max_requests:
+            resp = JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32000, "message": "Too Many Requests: generous per-subject rate limit exceeded"},
+                    "id": None,
+                },
+                status_code=429,
+                headers={"Retry-After": "60"},
+            )
+            await resp(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
+
+
+class NoStackTraceMiddleware:
+    """Catches unhandled server exceptions and returns clean error responses without stack traces."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        try:
+            await self.app(scope, receive, send)
+        except Exception as exc:
+            clean_err = sanitize_log_text(str(exc))
+            logger.error("Internal server error: %s", clean_err)
+            resp = JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32603, "message": "Internal server error"},
+                    "id": None,
+                },
+                status_code=500,
+            )
+            await resp(scope, receive, send)
+
+
 class StructuredLoggingMiddleware:
     """Structured request logging capturing request ID, tool name, masked subject, latency, outcome."""
 
@@ -168,20 +317,13 @@ class StructuredLoggingMiddleware:
             masked_sub = mask_subject(sub)
             outcome = "ok" if status_code[0] < 400 else "error"
 
-            logger.info(
-                "[REQ] server=%s role=%s request_id=%s method=%s path=%s "
-                "tool=%s subject=%s status=%d latency_ms=%.1f outcome=%s",
-                self.server_name,
-                self.role,
-                req_id,
-                method,
-                path,
-                tool_name or "-",
-                masked_sub,
-                status_code[0],
-                latency_ms,
-                outcome,
+            log_msg = (
+                f"[REQ] server={self.server_name} role={self.role} request_id={req_id} "
+                f"method={method} path={path} tool={tool_name or '-'} subject={masked_sub} "
+                f"status={status_code[0]} latency_ms={latency_ms:.1f} outcome={outcome}"
             )
+            logger.info(sanitize_log_text(log_msg))
+
 
 
 class ServerAppWrapper:
@@ -275,6 +417,7 @@ def create_server(
 
     # Healthcheck endpoint (bypasses Bearer auth)
     @mcp_server.custom_route("/healthz", methods=["GET"])
+    @mcp_server.custom_route(f"{parsed_path}/healthz", methods=["GET"])
     async def healthz(request: Any) -> JSONResponse:
         return JSONResponse({
             "status": "ok",
@@ -292,7 +435,11 @@ def create_server(
 
     # Wrap with middlewares
     auth_scope_app = EnsureWWWAuthenticateScopeMiddleware(base_app, role=role)
-    logging_app = StructuredLoggingMiddleware(auth_scope_app, server_name=name, role=role)
+    rate_limited_app = SubjectRateLimitMiddleware(auth_scope_app, max_requests=120, window_seconds=60.0)
+    size_limited_app = RequestSizeLimitMiddleware(rate_limited_app, max_bytes=5 * 1024 * 1024)
+    timeout_app = RequestTimeoutMiddleware(size_limited_app, timeout_seconds=30.0)
+    no_trace_app = NoStackTraceMiddleware(timeout_app)
+    logging_app = StructuredLoggingMiddleware(no_trace_app, server_name=name, role=role)
 
     # Starlette ASGI app with lifespan support from base_app
     app_wrapper = ServerAppWrapper(
@@ -302,5 +449,6 @@ def create_server(
         canonical_url=canonical_url,
         role=role,
     )
+
 
     return app_wrapper

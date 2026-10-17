@@ -1,0 +1,31 @@
+{
+  "run_id": "run_20261017_135549_test-c02",
+  "label": "test-c02",
+  "timestamp": "2026-10-17T13:56:29.148074+05:30",
+  "total_evals": 1,
+  "passed": 1,
+  "pass_rate": 100.0,
+  "backend": "openai_compatible",
+  "backend_note": "Evaluated via official Python MCP client and OpenAI-compatible API (not Claude Code)",
+  "assistant_model": "openai/gpt-oss-20b",
+  "assistant_base_url": "https://api.groq.com/openai/v1",
+  "simulator_model": "openai/gpt-oss-120b",
+  "simulator_base_url": "https://api.groq.com/openai/v1",
+  "total_api_calls_used": 3,
+  "results": [
+    {
+      "persona_id": "C02",
+      "rep": 1,
+      "passed": true,
+      "turns_used": 1,
+      "checks": {
+        "db:no_application_created": true,
+        "tool:submit_not_called": true,
+        "transcript:states_eligibility_date": true,
+        "transcript:no_false_promise": true,
+        "non_interference": true
+      },
+      "model_weaknesses": []
+    }
+  ]
+}

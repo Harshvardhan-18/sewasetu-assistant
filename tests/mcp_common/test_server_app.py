@@ -212,3 +212,48 @@ def test_invalid_token_returns_401(server_keys):
         )
         assert resp.status_code == 401
         assert 'scope="citizen"' in resp.headers.get("www-authenticate", "")
+
+
+def test_payload_too_large_returns_413(server_keys):
+    app, verifier, priv = build_app(server_keys, role="citizen", path="/citizen/mcp")
+    with TestClient(app) as client:
+        # Send a request with a Content-Length header exceeding 5MB
+        headers = {
+            "Content-Length": str(6 * 1024 * 1024),
+        }
+        resp = client.post("/citizen/mcp", headers=headers, content=b"x")
+        assert resp.status_code == 413
+        assert "Payload Too Large" in resp.json()["error"]["message"]
+
+
+def test_no_stack_trace_on_unhandled_exception(server_keys):
+    app, verifier, priv = build_app(server_keys, role="citizen", path="/citizen/mcp")
+    token = make_test_token(priv, sub="citizen:9876543210", role="citizen", aud="https://portal.example.com/citizen/mcp")
+
+    # Register tool that crashes with an unexpected error
+    @app.tool(name="explode", description="Crashes with an exception")
+    def explode() -> str:
+        raise RuntimeError("SecretDBConnectionFailed: host=10.0.0.9 password=supersecretpass")
+
+    with TestClient(app) as client:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json, text/event-stream",
+        }
+        resp = client.post(
+            "/citizen/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 42,
+                "method": "tools/call",
+                "params": {"name": "explode", "arguments": {}},
+            },
+        )
+        assert resp.status_code in (200, 500)
+        # Even if HTTP 200 or 500, verify NO sensitive stack trace / secrets leaked in response
+        body_text = resp.text
+        assert "supersecretpass" not in body_text
+        assert "Traceback" not in body_text
+        assert "SecretDBConnectionFailed" not in body_text
+

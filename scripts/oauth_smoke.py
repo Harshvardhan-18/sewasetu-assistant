@@ -928,14 +928,37 @@ def smoke_all(cfg: SmokeConfig) -> bool:
 # ── CLI entry-point ───────────────────────────────────────────────────────────
 
 def _parse_args() -> SmokeConfig:
+    env_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+    if os.path.exists(env_file):
+        try:
+            with open(env_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k not in os.environ and v:
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+    host_default = os.environ.get(
+        "HOST", "https://sewasetu-hv.koreacentral.cloudapp.azure.com"
+    )
+    smsgw_default = os.environ.get("SMSGW_URL")
+    if not smsgw_default:
+        if "azure.com" in host_default or ("localhost" not in host_default and "127.0.0.1" not in host_default):
+            smsgw_default = f"{host_default.rstrip('/')}/__gateway"
+        else:
+            smsgw_default = "http://localhost:8025"
+
     p = argparse.ArgumentParser(
         description="Headless OAuth 2.1 smoke test for Sewa Setu MCP servers.",
     )
     p.add_argument(
         "--host",
-        default=os.environ.get(
-            "HOST", "https://sewasetu-hv.koreacentral.cloudapp.azure.com"
-        ),
+        default=host_default,
         help="Portal base URL  (default: $HOST or the live Azure VM)",
     )
     p.add_argument(
@@ -957,9 +980,9 @@ def _parse_args() -> SmokeConfig:
     )
     p.add_argument(
         "--smsgw",
-        default=os.environ.get("SMSGW_URL", "http://localhost:8025"),
+        default=smsgw_default,
         dest="smsgw_base",
-        help="SMS gateway URL  (default: $SMSGW_URL or http://localhost:8025)",
+        help="SMS gateway URL  (default: $SMSGW_URL or portal gateway)",
     )
     p.add_argument(
         "--role",
