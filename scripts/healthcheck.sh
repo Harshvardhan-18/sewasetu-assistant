@@ -12,7 +12,7 @@
 set -euo pipefail
 
 HOST="${PUBLIC_BASE_URL:-https://sewasetu-hv.koreacentral.cloudapp.azure.com}"
-LOG_FILE="${HEALTHCHECK_LOG:-/var/log/sewasetu-healthcheck.log}"
+LOG_FILE="${HEALTHCHECK_LOG:-/tmp/sewasetu-healthcheck.log}"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
