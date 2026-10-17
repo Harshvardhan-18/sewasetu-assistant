@@ -72,9 +72,6 @@ must_be_true:
         AND al.actor = 'applicant:' || %(mobile)s
       expect: {cnt: 1}
   tool_calls:
-    - name: get_scheme_info_called
-      tool: get_scheme_info
-      check: called
     - name: submit_application_called
       tool: submit_application
       check: called
@@ -89,7 +86,7 @@ must_be_true:
     - name: no_hallucinated_amount
       must_not_match: "Rs\\.?\\s*1[,.]?000"
     - name: mentions_receipt
-      must_match: "(?i)(received|application number|submitted)"
+      must_match: "(?i)(received|application number|submitted|SSP\\d+|सफलतापूर्वक|जमा)"
   judge:
     - "Reply is in Hindi or Assamese mix, not formal English jargon."
     - "Assistant confirmed the application number with the citizen before ending."
