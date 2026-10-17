@@ -257,14 +257,15 @@ def run_s6_hostile_strings_stored_literally(client: OAuthClient) -> tuple[bool, 
     if not env_draft.get("ok"):
         return False, f"Failed to save draft: {env_draft}"
 
-    # 2. Attach age proof
+    # 2. Attach age proof via base64 (deterministic, zero external HTTP dependency)
+    b64_pdf = "JVBERi0xLjQKMSAwIG9iajw8Pj5lbmRvYmoKdHJhaWxlcjw8Pj4KJSVFT0YK"
     res_proof = client.call_tool(
         tok.access_token,
         "attach_age_proof",
         {
             "document_type": "voter_id",
-            "filename": "c01_kamala_aadhar.jpg",
-            "file_url": f"{PUBLIC_BASE_URL}/eval-dashboard/assets/c01_kamala_aadhar.jpg",
+            "filename": "proof.pdf",
+            "file_base64": b64_pdf,
         },
         mcp_url=CITIZEN_URL,
     )
