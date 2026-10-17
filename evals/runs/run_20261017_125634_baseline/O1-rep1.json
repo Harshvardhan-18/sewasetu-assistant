@@ -1,0 +1,85 @@
+{
+  "persona_id": "O1",
+  "rep": 1,
+  "role": "officer",
+  "mobile": "9990000081",
+  "passed": false,
+  "turns_used": 1,
+  "citizen_messages": 1,
+  "duration_seconds": 36.89,
+  "backend": "openai_compatible",
+  "backend_note": "Evaluated via official Python MCP client and OpenAI-compatible API (not Claude Code)",
+  "assistant_model": "openai/gpt-oss-20b",
+  "assistant_base_url": "https://api.groq.com/openai/v1",
+  "simulator_model": "openai/gpt-oss-120b",
+  "simulator_base_url": "https://api.groq.com/openai/v1",
+  "model_weaknesses": [],
+  "checks": {
+    "db:clean_rows_approved": true,
+    "db:under_age_row_rejected": true,
+    "db:approved_audit_rows_correct": true,
+    "db:rejected_audit_row_correct": true,
+    "tool:verify_application_called": false,
+    "tool:decide_application_called": false
+  },
+  "check_details": {
+    "db:clean_rows_approved": {
+      "sql": "SELECT COUNT(*) AS cnt FROM applications WHERE mobile BETWEEN '9990000060' AND '9990000070' AND status = 'APPROVED' AND decided_by = 'admin'\n",
+      "expect_gte": {
+        "cnt": 2
+      },
+      "actual": [
+        3
+      ]
+    },
+    "db:under_age_row_rejected": {
+      "sql": "SELECT COUNT(*) AS cnt FROM applications WHERE mobile BETWEEN '9990000060' AND '9990000070' AND status = 'REJECTED' AND decided_by = 'admin'\n",
+      "expect_gte": {
+        "cnt": 1
+      },
+      "actual": [
+        1
+      ]
+    },
+    "db:approved_audit_rows_correct": {
+      "sql": "SELECT COUNT(*) AS cnt FROM audit_log al JOIN applications a ON al.application_id = a.id WHERE a.mobile BETWEEN '9990000060' AND '9990000070' AND al.action = 'APPROVED' AND al.actor = 'admin:admin' AND al.note LIKE 'via officer assistant:%'\n",
+      "expect_gte": {
+        "cnt": 2
+      },
+      "actual": [
+        3
+      ]
+    },
+    "db:rejected_audit_row_correct": {
+      "sql": "SELECT COUNT(*) AS cnt FROM audit_log al JOIN applications a ON al.application_id = a.id WHERE a.mobile BETWEEN '9990000060' AND '9990000070' AND al.action = 'REJECTED' AND al.actor = 'admin:admin' AND al.note LIKE 'via officer assistant:%'\n",
+      "expect_gte": {
+        "cnt": 1
+      },
+      "actual": [
+        1
+      ]
+    },
+    "tool:verify_application_called": {
+      "called_names": [],
+      "rule": "called"
+    },
+    "tool:decide_application_called": {
+      "called_names": [],
+      "rule": "called"
+    },
+    "judge_rubric": {
+      "error": "Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199727, Requested 507. Please try again in 1m41.088s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+    }
+  },
+  "tool_calls": [],
+  "history": [
+    {
+      "role": "citizen",
+      "content": "Goal: Process the Sonari pending queue \u2014 approve clean applications, reject ineligible ones."
+    },
+    {
+      "role": "system",
+      "content": "Assistant LLM error: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199806, Requested 1889. Please try again in 12m12.24s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+    }
+  ]
+}

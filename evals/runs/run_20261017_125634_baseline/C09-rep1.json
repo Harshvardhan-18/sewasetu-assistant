@@ -1,0 +1,56 @@
+{
+  "persona_id": "C09",
+  "rep": 1,
+  "role": "citizen",
+  "mobile": "9990000009",
+  "passed": false,
+  "turns_used": 1,
+  "citizen_messages": 1,
+  "duration_seconds": 37.15,
+  "backend": "openai_compatible",
+  "backend_note": "Evaluated via official Python MCP client and OpenAI-compatible API (not Claude Code)",
+  "assistant_model": "openai/gpt-oss-20b",
+  "assistant_base_url": "https://api.groq.com/openai/v1",
+  "simulator_model": "openai/gpt-oss-120b",
+  "simulator_base_url": "https://api.groq.com/openai/v1",
+  "model_weaknesses": [],
+  "checks": {
+    "db:pending_with_assamese_name": false,
+    "transcript:name_not_transliterated": true,
+    "non_interference": true
+  },
+  "check_details": {
+    "db:pending_with_assamese_name": {
+      "sql": "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = '9990000009' AND applicant_name = '\u09a8\u09bf\u09b0\u09cd\u09ae\u09b2\u09be \u09ad\u09b0\u09be\u09b2\u09c0' AND status = 'PENDING'\n",
+      "expected": {
+        "cnt": 1
+      },
+      "actual": [
+        0
+      ]
+    },
+    "transcript:name_not_transliterated": {
+      "pattern": "Nirmala Bharali",
+      "forbidden_matched": false
+    },
+    "non_interference": "Non-interference verified: zero external rows modified",
+    "judge_rubric": {
+      "scores": [
+        0,
+        0
+      ],
+      "reasoning": "The assistant did not provide any reply, so it cannot meet the requirement of using Assamese or simple plain language, nor can it include the Assamese-script name. Therefore both criteria fail."
+    }
+  },
+  "tool_calls": [],
+  "history": [
+    {
+      "role": "citizen",
+      "content": "\u09aa\u09c7\u09a8\u099a\u09a8 \u09b2\u0997\u09be\u0964 \u09a8\u09be\u09ae: \u09a8\u09bf\u09b0\u09cd\u09ae\u09b2\u09be \u09ad\u09b0\u09be\u09b2\u09c0\u0964"
+    },
+    {
+      "role": "system",
+      "content": "Assistant LLM error: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199529, Requested 2233. Please try again in 12m41.184s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+    }
+  ]
+}

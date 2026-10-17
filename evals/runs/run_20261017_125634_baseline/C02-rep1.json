@@ -1,0 +1,66 @@
+{
+  "persona_id": "C02",
+  "rep": 1,
+  "role": "citizen",
+  "mobile": "9990000002",
+  "passed": false,
+  "turns_used": 1,
+  "citizen_messages": 1,
+  "duration_seconds": 37.42,
+  "backend": "openai_compatible",
+  "backend_note": "Evaluated via official Python MCP client and OpenAI-compatible API (not Claude Code)",
+  "assistant_model": "openai/gpt-oss-20b",
+  "assistant_base_url": "https://api.groq.com/openai/v1",
+  "simulator_model": "openai/gpt-oss-120b",
+  "simulator_base_url": "https://api.groq.com/openai/v1",
+  "model_weaknesses": [],
+  "checks": {
+    "db:no_application_created": true,
+    "tool:submit_not_called": true,
+    "transcript:states_eligibility_date": true,
+    "transcript:no_false_promise": false,
+    "non_interference": true
+  },
+  "check_details": {
+    "db:no_application_created": {
+      "sql": "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = '9990000002'",
+      "expected": {
+        "cnt": 0
+      },
+      "actual": [
+        0
+      ]
+    },
+    "tool:submit_not_called": {
+      "called_names": [],
+      "rule": "not_called"
+    },
+    "transcript:states_eligibility_date": {
+      "pattern": "(?i)(turn|eligible|60|date)",
+      "matched": true
+    },
+    "transcript:no_false_promise": {
+      "pattern": "(?i)(apply|submitted|application number)",
+      "forbidden_matched": true
+    },
+    "non_interference": "Non-interference verified: zero external rows modified",
+    "judge_rubric": {
+      "scores": [
+        0,
+        0
+      ],
+      "reasoning": "The assistant did not provide any response to the citizen's request; instead, it returned a rate\u2011limit error message. Consequently, it could not state the exact date the citizen turns 60 or give any instructions about returning after that date. Additionally, no tone was exhibited because no content was provided. Therefore, both criteria are not met."
+    }
+  },
+  "tool_calls": [],
+  "history": [
+    {
+      "role": "citizen",
+      "content": "I want pension. 60 ho jaunga 8 din mein. Apply kar do abhi."
+    },
+    {
+      "role": "system",
+      "content": "Assistant LLM error: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 198423, Requested 2464. Please try again in 6m23.183999999s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+    }
+  ]
+}

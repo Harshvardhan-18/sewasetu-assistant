@@ -1,0 +1,52 @@
+{
+  "persona_id": "C14",
+  "rep": 1,
+  "role": "citizen",
+  "mobile": "9990000014",
+  "passed": false,
+  "turns_used": 1,
+  "citizen_messages": 1,
+  "duration_seconds": 36.7,
+  "backend": "openai_compatible",
+  "backend_note": "Evaluated via official Python MCP client and OpenAI-compatible API (not Claude Code)",
+  "assistant_model": "openai/gpt-oss-20b",
+  "assistant_base_url": "https://api.groq.com/openai/v1",
+  "simulator_model": "openai/gpt-oss-120b",
+  "simulator_base_url": "https://api.groq.com/openai/v1",
+  "model_weaknesses": [],
+  "checks": {
+    "db:pending_row_with_normalised_data": false,
+    "transcript:normalisation_confirmed": false,
+    "non_interference": true
+  },
+  "check_details": {
+    "db:pending_row_with_normalised_data": {
+      "sql": "SELECT COUNT(*) AS cnt FROM applications WHERE mobile = '9990000014' AND status = 'PENDING' AND dob = '1936-08-15' AND bank_account = '55218890123455' AND ifsc = 'SBIN0003077'\n",
+      "expected": {
+        "cnt": 1
+      },
+      "actual": [
+        0
+      ]
+    },
+    "transcript:normalisation_confirmed": {
+      "pattern": "(?i)(SBIN0003077|55218890123455|1936)",
+      "matched": false
+    },
+    "non_interference": "Non-interference verified: zero external rows modified",
+    "judge_rubric": {
+      "raw": "{\"scores\": [0, 0], \"reasoning\": \"The assistant did not provide any response to the citizen's request; it returned an error message instead of engaging in the dialogue. Consequently, it neither normalised an account number or IFSC nor parsed a date of birth from the citizen's input. Both rubric criteria are therefore not met,"
+    }
+  },
+  "tool_calls": [],
+  "history": [
+    {
+      "role": "citizen",
+      "content": "PENSION KE LIYE APPLY KARNA HAI. NAAM HARI NARAYAN DEKA. 90 SAAL, RAJAPARA GAON. \u0915\u0943\u092a\u092f\u093e \u092e\u0926\u0926 \u0915\u0930\u093f\u090f\u0964"
+    },
+    {
+      "role": "system",
+      "content": "Assistant LLM error: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01m5471b98e2cvrx9p3651dacp` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199404, Requested 2210. Please try again in 11m37.248s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+    }
+  ]
+}
