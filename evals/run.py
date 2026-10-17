@@ -278,6 +278,7 @@ def call_openai_with_backoff(
                 match = re.search(r"try again in ([0-9.]+)s", err_str)
                 if match:
                     wait_time = max(wait_time, float(match.group(1)) + 0.5)
+                wait_time = min(wait_time, 25.0)
                 print(f"    [429 Rate Limit] Backing off for {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})...")
                 time.sleep(wait_time)
             else:
@@ -417,7 +418,8 @@ def run_simulator_turn(
         )
 
     messages = [{"role": "system", "content": system_prompt}]
-    for msg in conversation_history:
+    recent_history = conversation_history[-8:] if len(conversation_history) > 8 else conversation_history
+    for msg in recent_history:
         role_tag = "assistant" if msg["role"] == "citizen" else "user"
         messages.append({"role": role_tag, "content": msg["content"]})
 
@@ -912,9 +914,9 @@ def main() -> int:
         print("ERROR: openai package is required for OpenAI-compatible backends. Run: pip install openai")
         return 1
 
-    # Initialize OpenAI clients
-    asst_client = openai.OpenAI(base_url=asst_config["base_url"], api_key=asst_config["api_key"])
-    sim_client = openai.OpenAI(base_url=sim_config["base_url"], api_key=sim_config["api_key"])
+    # Initialize OpenAI clients (max_retries=0 so call_openai_with_backoff manages retries)
+    asst_client = openai.OpenAI(base_url=asst_config["base_url"], api_key=asst_config["api_key"], max_retries=0)
+    sim_client = openai.OpenAI(base_url=sim_config["base_url"], api_key=sim_config["api_key"], max_retries=0)
     oauth_client = OAuthClient(portal_base=PUBLIC_BASE_URL, smsgw_base=SMSGW_URL)
 
     run_id = f"run_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}_{args.label}"
